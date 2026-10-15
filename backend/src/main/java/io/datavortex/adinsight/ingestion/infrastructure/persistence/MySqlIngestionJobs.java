@@ -7,6 +7,7 @@ import io.datavortex.adinsight.ingestion.application.port.IngestionJobRepository
 import io.datavortex.adinsight.ingestion.domain.model.IngestionJob;
 import io.datavortex.adinsight.ingestion.domain.model.IngestionRequest;
 import io.datavortex.adinsight.ingestion.domain.model.JobLease;
+import io.datavortex.adinsight.ingestion.domain.model.PipelineResult;
 import io.datavortex.adinsight.shared.domain.BusinessException;
 import java.time.Duration;
 import java.util.List;
@@ -18,17 +19,19 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 @Repository
 public class MySqlIngestionJobs implements IngestionJobRepository, FetchJobQueue {
-    private static final String COLUMNS =
+    static final String COLUMNS =
             """
             id, tenant_id, account_id, report_kind, date_from, date_to, logical_request_id,
             request_hash, status, stage, attempt, run_sequence, rows_received, rows_loaded,
             rows_rejected, created_at, started_at, finished_at, next_retry_at, error_code,
-            lease_token, lease_owner, lease_generation, lease_until
+            lease_token, lease_owner, lease_generation, lease_until,
+            raw_manifest_uri, normalized_manifest_uri, rejected_uri
             """;
     private static final String LEASE_PREDICATE =
             """
             WHERE id = ? AND tenant_id = ? AND lease_token = ? AND lease_generation = ?
-              AND status = 'RUNNING' AND stage = 'FETCH' AND lease_until > CURRENT_TIMESTAMP(6)
+              AND status = 'RUNNING' AND stage IN ('FETCH','RAW_COMPLETE','NORMALIZE')
+              AND lease_until > CURRENT_TIMESTAMP(6)
             """;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
@@ -142,7 +145,7 @@ public class MySqlIngestionJobs implements IngestionJobRepository, FetchJobQueue
                                     "SELECT "
                                             + COLUMNS
                                             + """
-                     FROM ingestion_jobs WHERE stage='FETCH' AND (
+                     FROM ingestion_jobs WHERE stage IN ('FETCH','RAW_COMPLETE','NORMALIZE') AND (
                        status='PENDING'
                        OR (status='RETRY_WAIT' AND next_retry_at <= CURRENT_TIMESTAMP(6))
                        OR (status='RUNNING' AND lease_until <= CURRENT_TIMESTAMP(6)))
@@ -156,7 +159,9 @@ public class MySqlIngestionJobs implements IngestionJobRepository, FetchJobQueue
                     UUID token = UUID.randomUUID();
                     jdbc.update(
                             """
-                    UPDATE ingestion_jobs SET status='RUNNING', lease_owner=?, lease_token=?,
+                    UPDATE ingestion_jobs SET status='RUNNING', stage='FETCH', lease_owner=?, lease_token=?,
+                      raw_manifest_uri=NULL, normalized_manifest_uri=NULL, rejected_uri=NULL,
+                      rows_received=0, rows_rejected=0, error_code=NULL,
                       lease_generation=lease_generation+1,
                       lease_until=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)),
                       started_at=COALESCE(started_at,CURRENT_TIMESTAMP(6)), next_retry_at=NULL
@@ -203,7 +208,7 @@ public class MySqlIngestionJobs implements IngestionJobRepository, FetchJobQueue
                     int changed =
                             jdbc.update(
                                     """
-                    UPDATE ingestion_jobs SET status='RETRY_WAIT', attempt=attempt+1,
+                    UPDATE ingestion_jobs SET status='RETRY_WAIT', stage='FETCH', attempt=attempt+1,
                       next_retry_at=TIMESTAMPADD(SECOND,?,CURRENT_TIMESTAMP(6)), error_code=?,
                       lease_token=NULL, lease_owner=NULL, lease_until=NULL
                     """
@@ -245,6 +250,59 @@ public class MySqlIngestionJobs implements IngestionJobRepository, FetchJobQueue
                         () ->
                                 new BusinessException(
                                         LEASE_LOST, "Worker lease expired or was reclaimed"));
+    }
+
+    @Override
+    public void recordArtifacts(JobLease lease, PipelineResult result) {
+        requireOwned(
+                jdbc.update(
+                        """
+                UPDATE ingestion_jobs SET raw_manifest_uri=?, normalized_manifest_uri=?,
+                  rejected_uri=?, rows_received=?, rows_rejected=?
+                """
+                                + LEASE_PREDICATE,
+                        prepend(
+                                result.rawManifest(),
+                                prepend(
+                                        result.normalizedManifest(),
+                                        prepend(
+                                                result.rejectedUri(),
+                                                prepend(
+                                                        result.rowsReceived(),
+                                                        prepend(
+                                                                result.rowsRejected(),
+                                                                leaseArguments(lease))))))));
+    }
+
+    @Override
+    public void beginNormalization(JobLease lease) {
+        transactions.executeWithoutResult(
+                transaction -> {
+                    requireOwned(
+                            jdbc.update(
+                                    "UPDATE ingestion_jobs SET stage='RAW_COMPLETE' "
+                                            + LEASE_PREDICATE
+                                            + " AND stage='FETCH' AND raw_manifest_uri IS NOT NULL",
+                                    leaseArguments(lease)));
+                    requireOwned(
+                            jdbc.update(
+                                    "UPDATE ingestion_jobs SET stage='NORMALIZE' "
+                                            + LEASE_PREDICATE
+                                            + " AND stage='RAW_COMPLETE'",
+                                    leaseArguments(lease)));
+                });
+    }
+
+    @Override
+    public void awaitLoad(JobLease lease) {
+        requireOwned(
+                jdbc.update(
+                        """
+                UPDATE ingestion_jobs SET stage='LOAD', lease_token=NULL, lease_owner=NULL, lease_until=NULL
+                """
+                                + LEASE_PREDICATE
+                                + " AND stage='NORMALIZE' AND normalized_manifest_uri IS NOT NULL",
+                        leaseArguments(lease)));
     }
 
     private JobLease readLease(IngestionJob job) {

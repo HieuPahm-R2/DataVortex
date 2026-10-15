@@ -39,7 +39,10 @@ final class IngestionJobRowMapper implements RowMapper<IngestionJob> {
                 instant(row, "started_at"),
                 instant(row, "finished_at"),
                 instant(row, "next_retry_at"),
-                row.getString("error_code"));
+                row.getString("error_code"),
+                row.getString("raw_manifest_uri"),
+                row.getString("normalized_manifest_uri"),
+                row.getString("rejected_uri"));
     }
 
     static Instant instant(ResultSet row, String column) throws SQLException {
