@@ -17,6 +17,16 @@ spring:
       hibernate.jdbc.time_zone: UTC
   flyway:
     enabled: true
+ingestion:
+  cloud:
+    project: ${WAREHOUSE_PROJECT:}
+    bucket: ${WAREHOUSE_BUCKET:}
+    dataset: ${WAREHOUSE_DATASET:}
+    location: ${WAREHOUSE_LOCATION:}
+    artifacts-root: ${WAREHOUSE_ARTIFACTS_ROOT:}
+    dataform-repository: ${WAREHOUSE_DATAFORM_REPOSITORY:}
+    dataform-revision: ${WAREHOUSE_DATAFORM_REVISION:}
+    maximum-bytes-billed: ${WAREHOUSE_MAXIMUM_BYTES_BILLED:}
 server:
   error:
     include-message: never
