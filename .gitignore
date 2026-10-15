@@ -1,0 +1,11 @@
+**/target/
+.venv/
+__pycache__/
+*.pyc
+.env
+.local/
+data/generated/
+scripts/bin/*.exe
+.harness-backup/
+.harness-core/update/
+.harness-core/update-candidate/
