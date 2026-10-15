@@ -18,7 +18,10 @@ public record IngestionJob(
         Instant startedAt,
         Instant finishedAt,
         Instant nextRetryAt,
-        String errorCode) {
+        String errorCode,
+        String rawManifestUri,
+        String normalizedManifestUri,
+        String rejectedUri) {
     public static final int MAX_RETRIES = 5;
 
     public IngestionJob {
@@ -42,7 +45,10 @@ public record IngestionJob(
         return attempt >= MAX_RETRIES;
     }
 
-    /** A crash reclaim keeps this identity; only a terminal-failure retry changes attempt. */
+    /**
+     * Logical request identity retained for queue consumers. Warehouse execution uses the bound raw
+     * run and stage attempt in WarehouseTask.remoteJobId(), persisted before any remote submission.
+     */
     public String externalJobId(IngestionStage externalStage) {
         if (externalStage != IngestionStage.LOAD && externalStage != IngestionStage.PUBLISH) {
             throw new IllegalArgumentException(
