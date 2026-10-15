@@ -129,7 +129,7 @@ Sequence allocation and deduplication share one transaction. The MVP serializes
 submission within a tenant to avoid a duplicate-key race; this is a deliberate
 throughput tradeoff, not a claim of high-scale ingestion.
 
-`FetchJobQueue` only claims FETCH-stage jobs. It uses database UTC time,
+`FetchJobQueue` claims local FETCH/RAW_COMPLETE/NORMALIZE-stage jobs. It uses database UTC time,
 `FOR UPDATE SKIP LOCKED`, an unguessable lease token and increasing generation.
 Renew/retry/fail require an unexpired matching lease. Crash reclaim keeps the
 attempt and deterministic external job identity; an explicit transient failure
@@ -144,13 +144,44 @@ configuration avoids treating each Basic request as a new session login and
 clearing its CSRF token. The integration test submits twice with the same token
 and cookie, and separately rejects a request without CSRF proof.
 
-There is no scheduler or source handler wired yet: jobs remain PENDING until a
-worker consumes the queue. Claiming does not fetch data or publish anything.
-The fetch lease is not a warehouse publisher fence. GCS/BigQuery adapters,
-persisted remote job reconciliation, the single publisher lock and
-publish/checkpoint completion remain pending. The queue has no operation that
-can mark a job SUCCEEDED or advance a watermark without that future protocol.
+`LocalIngestionWorker` coordinates the local slice through `LocalIngestionPipeline`.
+The opt-in `LocalWorkerConfiguration` schedules one polling job at a time.
+`PythonIngestionPipeline` is an outbound adapter: it reads scoped MySQL account
+and campaign metadata, creates a credential-free request file and runs the existing
+Python pipeline with a bounded subprocess lifetime. Its wait loop renews the
+lease; loss of ownership cancels the subprocess. Domain/application layers remain
+plain Java. Source I/O and raw/Parquet encoding stay together in Python rather
+than introducing a second normalization implementation in Java.
 
-`pipeline/` remains the raw/Parquet tooling and SQLite test oracle, independent
-of backend persistence. `warehouse/bigquery/` contains prepared cloud SQL assets.
+Complete raw transitions through RAW_COMPLETE to NORMALIZE. Valid Parquet parks
+the job at RUNNING/LOAD and releases the local lease. V3 adds its normalized
+manifest pointer. Artifact pointers/counters and stage transitions are fenced by
+the same database token/generation/expiry predicate. Crash reclaim at any local
+stage restarts FETCH in a fresh raw directory; previous artifacts remain intact.
+The local lease is not a warehouse publisher fence. A separate `WarehouseWorker`
+coordinates the cloud stages through `WarehouseQueue` and `WarehouseGateway` ports.
+`MySqlWarehouseQueue` owns tenant-bound V4 execution state and a global publisher
+slot. It locks the slot before selecting a job; expiry reassigns ownership of the
+same job, never another scope with an unknown remote outcome. Token/generation and
+database expiry fence every mutation. A dedicated heartbeat supports blocking SDK
+calls. Persisted plan/command data pins run, target, compiled SQL, byte cap and
+deterministic remote identity across crash and configuration changes.
+
+`GcsSnapshotStore` verifies local proof and uploads with create-only generation and
+CRC32C preconditions. Existing identical objects are resumable; conflicts fail.
+`DataformCompiler` compiles a pinned source revision and retrieves quality/publish
+operations. `BigQueryWarehouseGateway` submits those compiled operations under
+persisted IDs and typed parameters, checks request fingerprints on reconciliation,
+and distinguishes missing/running/success/terminal failure from dependency ambiguity.
+It never generates a fresh remote ID merely because the response was lost.
+
+The cloud worker advances LOAD → MANIFEST (public stage LOAD) → TRANSFORM → PUBLISH
+→ CHECKPOINT. A successful remote publish permits the atomic MySQL transaction
+that writes checkpoint/watermark and SUCCEEDED; a crash resumes from the persisted
+stage rather than loading/publishing blindly. The cloud composition is opt-in and
+its real service execution remains unverified until the explicit cloud proof passes.
+See [local ingestion](local-ingestion.md) and [warehouse cloud](warehouse-cloud.md).
+
+`pipeline/` owns raw/Parquet encoding; its SQLite warehouse remains a test oracle,
+not a backend analytics adapter. `warehouse/bigquery/` contains prepared cloud SQL assets.
 Search, UI, reports, forecast, bidding and cloud deployment remain pending.

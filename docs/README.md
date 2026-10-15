@@ -5,6 +5,10 @@
 - [Harness workflow](WORKFLOW.md): repository authority, evidence and recovery.
 - [Architecture](architecture.md): implemented boundaries, concrete service/entity/DTO/controller layout and missing modules.
 - [OpenAPI](openapi.yaml): implemented HTTP contract.
+- [Local ingestion](local-ingestion.md): opt-in polling worker, REST/SOAP mocks,
+  immutable raw/Parquet evidence and recovery before cloud publication.
+- [Warehouse cloud](warehouse-cloud.md): GCS/BigQuery adapters, Dataform source,
+  durable publisher recovery, dev setup and explicit live proof.
 - [Active implementation plan](plans/active/adinsight-v1.md): progress and next dependencies.
 - [Grain/snapshot decision](decisions/0001-grain-and-snapshot-publication.md).
 
