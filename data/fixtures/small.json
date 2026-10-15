@@ -1,0 +1,12 @@
+{
+  "generator_version": 1,
+  "schema_version": 1,
+  "seed": 20261014,
+  "date_from": "2026-08-15",
+  "days": 60,
+  "tenants": 2,
+  "platforms": ["MOCK_REST", "MOCK_SOAP"],
+  "campaigns_per_account": 5,
+  "keywords_per_campaign": 10,
+  "page_size": 100
+}
