@@ -1,0 +1,3 @@
+[submodule "repository-harness"]
+	path = repository-harness
+	url = https://github.com/hoangnb24/repository-harness.git
