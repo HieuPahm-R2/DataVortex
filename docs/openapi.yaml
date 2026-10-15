@@ -1,0 +1,207 @@
+openapi: 3.1.0
+info:
+  title: AdInsight API
+  version: 0.1.0
+  description: Account metadata and durable ingestion queue. Cloud execution is not wired yet.
+servers:
+  - url: /api/v1
+security:
+  - basicAuth: []
+paths:
+  /csrf:
+    get:
+      operationId: getCsrfToken
+      summary: Obtain a CSRF token and retain its session cookie for POST requests
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+      responses:
+        '200':
+          description: Send the returned token using headerName and retain the session cookie
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [headerName, token]
+                properties:
+                  headerName: {type: string}
+                  token: {type: string}
+        '400': {$ref: '#/components/responses/InvalidTenant'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /ingestion-jobs:
+    post:
+      operationId: submitIngestionJob
+      summary: Tenant admin submits an account/report/date snapshot request
+      description: Same tenant/key/scope returns the same job; changed scope returns 409. CSRF token and session cookie are required.
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - in: header
+          name: Idempotency-Key
+          required: true
+          schema: {type: string, minLength: 1, maxLength: 100}
+        - in: header
+          name: X-CSRF-TOKEN
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [accountId, reportKind, dateFrom, dateTo]
+              properties:
+                accountId: {type: string, format: uuid}
+                reportKind: {type: string, enum: [CAMPAIGN, KEYWORD]}
+                dateFrom: {type: string, format: date}
+                dateTo: {type: string, format: date}
+      responses:
+        '202':
+          description: Durable queued job; workers/cloud adapters are a separate deployment concern
+          headers:
+            Location:
+              schema: {type: string, format: uri-reference}
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IngestionJob'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /ingestion-jobs/{id}:
+    get:
+      operationId: getIngestionJob
+      summary: Tenant admin or analyst reads job status within their tenant
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - in: path
+          name: id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Durable job status and quality counters, without worker lease secrets
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/IngestionJob'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /accounts:
+    get:
+      operationId: listAccounts
+      summary: List accounts in the authenticated tenant
+      parameters:
+        - in: header
+          name: X-Tenant-Id
+          required: true
+          schema: {type: string, format: uuid}
+      responses:
+        '200':
+          description: Credential-free metadata scoped by verified active membership
+          headers:
+            X-Request-Id:
+              schema: {type: string, format: uuid}
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, requestId]
+                properties:
+                  requestId: {type: string, format: uuid}
+                  items:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, platform, sourceAccountId, currency, timezone, status]
+                      properties:
+                        id: {type: string, format: uuid}
+                        platform: {type: string, enum: [MOCK_REST, MOCK_SOAP, GOOGLE_ADS]}
+                        sourceAccountId: {type: string}
+                        currency: {type: string, pattern: '^[A-Z]{3}$'}
+                        timezone: {type: string}
+                        status: {type: string}
+        '400': {$ref: '#/components/responses/InvalidTenant'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+components:
+  parameters:
+    Tenant:
+      in: header
+      name: X-Tenant-Id
+      required: true
+      schema: {type: string, format: uuid}
+  securitySchemes:
+    basicAuth: {type: http, scheme: basic}
+  schemas:
+    IngestionJob:
+      type: object
+      required: [id, accountId, reportKind, dateFrom, dateTo, status, stage, attempt, runSequence, rowsReceived, rowsLoaded, rowsRejected, createdAt, requestId]
+      properties:
+        id: {type: string, format: uuid}
+        accountId: {type: string, format: uuid}
+        reportKind: {type: string, enum: [CAMPAIGN, KEYWORD]}
+        dateFrom: {type: string, format: date}
+        dateTo: {type: string, format: date}
+        status: {type: string, enum: [PENDING, RUNNING, RETRY_WAIT, FAILED, SUCCEEDED]}
+        stage: {type: string, enum: [FETCH, RAW_COMPLETE, NORMALIZE, LOAD, TRANSFORM, PUBLISH, CHECKPOINT]}
+        attempt: {type: integer, minimum: 0, maximum: 5}
+        runSequence: {type: integer, format: int64, minimum: 1}
+        rowsReceived: {type: integer, format: int64, minimum: 0}
+        rowsLoaded: {type: integer, format: int64, minimum: 0}
+        rowsRejected: {type: integer, format: int64, minimum: 0}
+        createdAt: {type: string, format: date-time}
+        startedAt: {type: [string, 'null'], format: date-time}
+        finishedAt: {type: [string, 'null'], format: date-time}
+        nextRetryAt: {type: [string, 'null'], format: date-time}
+        errorCode: {type: [string, 'null']}
+        requestId: {type: string, format: uuid}
+    ApiError:
+      type: object
+      required: [code, message, requestId]
+      properties:
+        code: {type: string}
+        message: {type: string}
+        requestId: {type: string, format: uuid}
+  responses:
+    InvalidRequest:
+      description: INVALID_REQUEST or INVALID_TENANT — invalid body, dates or headers
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    NotFound:
+      description: NOT_FOUND — resource does not exist within the authenticated tenant
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Conflict:
+      description: IDEMPOTENCY_CONFLICT — key was already used for another scope
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    InvalidTenant:
+      description: INVALID_TENANT — missing or non-canonical UUID tenant header
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Unauthorized:
+      description: UNAUTHORIZED — authentication required
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Forbidden:
+      description: TENANT_FORBIDDEN or FORBIDDEN — active membership, permitted role and valid CSRF are required
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    Unavailable:
+      description: DATABASE_UNAVAILABLE — data or authorization dependency failed
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
