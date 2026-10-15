@@ -109,39 +109,52 @@ def normalized_rows(manifest_path, registry_path):
                 received += 1
                 try:
                     raw = json.loads(line)
-                except json.JSONDecodeError:
-                    fail("INVALID_JSON_ROW")
-                for field in ("tenant_id", "platform", "account_id", "currency", "account_timezone"):
-                    if raw.get(field) != manifest[field]:
-                        fail(f"ROW_SCOPE_MISMATCH: {field}")
-                campaign = campaigns.get(raw.get("campaign_id"))
-                if campaign is None or raw.get("source_campaign_id") != campaign["source_campaign_id"]:
-                    fail("CAMPAIGN_MAPPING_MISMATCH")
+                except json.JSONDecodeError as error:
+                    quality = QualityError("INVALID_JSON_ROW")
+                    quality.evidence = {"page": page["file"], "line": received, "raw_line": line}
+                    raise quality from error
                 try:
-                    report_date = date.fromisoformat(raw["report_date"])
-                except (KeyError, ValueError, TypeError):
-                    fail("INVALID_REPORT_DATE")
-                if not manifest["date_from"] <= report_date.isoformat() <= manifest["date_to"]:
-                    fail("REPORT_DATE_OUT_OF_SCOPE")
-                impressions = integer(raw.get("impressions"), "impressions")
-                clicks = integer(raw.get("clicks"), "clicks")
-                if clicks > impressions:
-                    fail("CLICKS_EXCEED_IMPRESSIONS")
-                conversions = numeric(raw.get("conversions"), "conversions")
-                with localcontext() as context:
-                    context.prec = 38
-                    cost = Decimal(integer(raw.get("cost_micros"), "cost_micros")) / Decimal(1_000_000)
-                    value = Decimal(integer(raw.get("conversion_value_micros"), "conversion_value_micros")) / Decimal(1_000_000)
-                yield {"tenant_id": manifest["tenant_id"], "platform": manifest["platform"],
-                    "account_id": manifest["account_id"], "campaign_id": raw["campaign_id"],
-                    "source_campaign_id": raw["source_campaign_id"], "report_date": report_date.isoformat(),
-                    "account_timezone": manifest["account_timezone"], "currency": manifest["currency"],
-                    "impressions": impressions, "clicks": clicks, "conversions": str(conversions),
-                    "cost": format(cost, "f"), "conversion_value": format(value, "f"),
-                    "run_id": manifest["run_id"], "run_sequence": manifest["run_sequence"],
-                    "fetched_at": manifest["fetched_at"], "is_partial": False, "schema_version": 1}
+                    yield normalize_row(raw, manifest, campaigns)
+                except (QualityError, KeyError, TypeError, ValueError) as error:
+                    quality = QualityError(str(error))
+                    quality.evidence = {"page": page["file"], "line": received, "raw_row": raw}
+                    raise quality from error
         if received != page["row_count"]:
             fail("PAGE_ROW_COUNT_MISMATCH")
+
+
+def normalize_row(raw, manifest, campaigns):
+    if not isinstance(raw, dict):
+        fail("INVALID_JSON_ROW: expected object")
+    for field in ("tenant_id", "platform", "account_id", "currency", "account_timezone"):
+        if raw.get(field) != manifest[field]:
+            fail(f"ROW_SCOPE_MISMATCH: {field}")
+    campaign = campaigns.get(raw.get("campaign_id"))
+    if campaign is None or raw.get("source_campaign_id") != campaign["source_campaign_id"]:
+        fail("CAMPAIGN_MAPPING_MISMATCH")
+    try:
+        report_date = date.fromisoformat(raw["report_date"])
+    except (KeyError, ValueError, TypeError):
+        fail("INVALID_REPORT_DATE")
+    if not manifest["date_from"] <= report_date.isoformat() <= manifest["date_to"]:
+        fail("REPORT_DATE_OUT_OF_SCOPE")
+    impressions = integer(raw.get("impressions"), "impressions")
+    clicks = integer(raw.get("clicks"), "clicks")
+    if clicks > impressions:
+        fail("CLICKS_EXCEED_IMPRESSIONS")
+    conversions = numeric(raw.get("conversions"), "conversions")
+    with localcontext() as context:
+        context.prec = 38
+        cost = Decimal(integer(raw.get("cost_micros"), "cost_micros")) / Decimal(1_000_000)
+        value = Decimal(integer(raw.get("conversion_value_micros"), "conversion_value_micros")) / Decimal(1_000_000)
+    return {"tenant_id": manifest["tenant_id"], "platform": manifest["platform"],
+        "account_id": manifest["account_id"], "campaign_id": raw["campaign_id"],
+        "source_campaign_id": raw["source_campaign_id"], "report_date": report_date.isoformat(),
+        "account_timezone": manifest["account_timezone"], "currency": manifest["currency"],
+        "impressions": impressions, "clicks": clicks, "conversions": str(conversions),
+        "cost": format(cost, "f"), "conversion_value": format(value, "f"),
+        "run_id": manifest["run_id"], "run_sequence": manifest["run_sequence"],
+        "fetched_at": manifest["fetched_at"], "is_partial": False, "schema_version": 1}
 
 
 def normalize_to_parquet(manifest_path, registry_path, output):
@@ -185,6 +198,7 @@ def normalize_to_parquet(manifest_path, registry_path, output):
             "raw_manifest_sha256": hashlib.sha256(Path(manifest_path).read_bytes()).hexdigest()})
     except (QualityError, KeyError, OSError, ValueError) as error:
         write_json(destination / "rejected.json", {"run_id": manifest["run_id"], "complete": False,
-            "rows_processed": count, "error": str(error)})
+            "rows_processed": count, "error": str(error),
+            "raw_manifest": str(Path(manifest_path).resolve()), **getattr(error, "evidence", {})})
         raise
     return destination / "manifest.json"
