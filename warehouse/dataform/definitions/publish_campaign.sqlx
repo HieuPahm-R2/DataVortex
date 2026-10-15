@@ -1,0 +1,3 @@
+config { type: "operations", dependencies: ["staging_quality"] }
+js { const campaign = require("includes/campaign"); }
+${campaign.publish()}
