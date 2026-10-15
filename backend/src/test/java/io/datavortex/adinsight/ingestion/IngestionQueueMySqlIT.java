@@ -1,14 +1,22 @@
 package io.datavortex.adinsight.ingestion;
 
 import static org.assertj.core.api.Assertions.*;
+import static org.awaitility.Awaitility.await;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.sun.net.httpserver.HttpServer;
 import io.datavortex.adinsight.ingestion.application.port.FetchJobQueue;
 import io.datavortex.adinsight.ingestion.application.port.IngestionJobRepository;
+import io.datavortex.adinsight.ingestion.application.service.LocalIngestionWorker;
 import io.datavortex.adinsight.ingestion.domain.model.*;
+import io.datavortex.adinsight.ingestion.infrastructure.config.LocalWorkerConfiguration;
+import io.datavortex.adinsight.ingestion.infrastructure.pipeline.PythonIngestionPipeline;
 import io.datavortex.adinsight.shared.domain.BusinessException;
 import java.net.CookieManager;
 import java.net.CookiePolicy;
 import java.net.http.HttpClient;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -20,10 +28,16 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.Executors;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.convert.ApplicationConversionService;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
 import org.springframework.boot.web.client.RestTemplateBuilder;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
+import org.springframework.core.env.MapPropertySource;
 import org.springframework.http.*;
 import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -101,6 +115,197 @@ class IngestionQueueMySqlIT {
                         PASSWORD);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"MOCK_REST", "MOCK_SOAP"})
+    void httpQueueFetchRawAndParquetWaitForCloudPublication(String platform, @TempDir Path output)
+            throws Exception {
+        jdbc.update("UPDATE ad_accounts SET platform=? WHERE id=?", platform, account.toString());
+        UUID campaign = UUID.randomUUID();
+        jdbc.update(
+                """
+                INSERT INTO campaigns(id,tenant_id,account_id,source_campaign_id,name,source_status,local_tags)
+                VALUES (?,?,?,'0001','Demo','ENABLED','[]')
+                """,
+                campaign.toString(),
+                tenant.toString(),
+                account.toString());
+        var headers = csrfHeaders();
+        headers.set("Idempotency-Key", "local-worker");
+        var submitted =
+                authenticatedApi.exchange(
+                        "/api/v1/ingestion-jobs",
+                        HttpMethod.POST,
+                        new HttpEntity<>(
+                                Map.of(
+                                        "accountId",
+                                        account,
+                                        "reportKind",
+                                        "CAMPAIGN",
+                                        "dateFrom",
+                                        "2026-10-01",
+                                        "dateTo",
+                                        "2026-10-14"),
+                                headers),
+                        Map.class);
+        assertThat(submitted.getStatusCode()).isEqualTo(HttpStatus.ACCEPTED);
+        UUID id = UUID.fromString(submitted.getBody().get("id").toString());
+        var json = new ObjectMapper();
+        var source = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        source.createContext(
+                "/",
+                exchange -> {
+                    // Fetch takes longer than a lease; the worker must renew while blocked on HTTP.
+                    try {
+                        Thread.sleep(1500);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                    byte[] response =
+                            json.writeValueAsBytes(
+                                    Map.of(
+                                            "rows",
+                                            List.of(
+                                                    Map.ofEntries(
+                                                            Map.entry(
+                                                                    "tenant_id", tenant.toString()),
+                                                            Map.entry("platform", platform),
+                                                            Map.entry(
+                                                                    "account_id",
+                                                                    account.toString()),
+                                                            Map.entry(
+                                                                    "campaign_id",
+                                                                    campaign.toString()),
+                                                            Map.entry("source_campaign_id", "0001"),
+                                                            Map.entry("currency", "VND"),
+                                                            Map.entry(
+                                                                    "account_timezone",
+                                                                    "Asia/Ho_Chi_Minh"),
+                                                            Map.entry("report_date", "2026-10-01"),
+                                                            Map.entry("impressions", 100),
+                                                            Map.entry("clicks", 5),
+                                                            Map.entry("conversions", "0.5"),
+                                                            Map.entry("cost_micros", 1250000),
+                                                            Map.entry(
+                                                                    "conversion_value_micros",
+                                                                    3750000))),
+                                            "complete",
+                                            true));
+                    // Explicit null cursor is required by the mock protocol.
+                    String body = new String(response, java.nio.charset.StandardCharsets.UTF_8);
+                    response =
+                            (body.substring(0, body.length() - 1) + ",\"next_page\":null}")
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    if (platform.equals("MOCK_SOAP")) {
+                        assertThat(exchange.getRequestHeaders().getFirst("SOAPAction"))
+                                .isEqualTo("GetCampaignReport");
+                        String requestXml =
+                                new String(
+                                        exchange.getRequestBody().readAllBytes(),
+                                        java.nio.charset.StandardCharsets.UTF_8);
+                        assertThat(requestXml)
+                                .contains("<source_account_id>001</source_account_id>");
+                        var xml =
+                                new StringBuilder(
+                                        "<s:Envelope xmlns:s=\"http://schemas.xmlsoap.org/soap/envelope/\"><s:Body><GetCampaignReportResponse><rows><row>");
+                        json.readTree(response)
+                                .path("rows")
+                                .get(0)
+                                .fields()
+                                .forEachRemaining(
+                                        field ->
+                                                xml.append('<')
+                                                        .append(field.getKey())
+                                                        .append('>')
+                                                        .append(field.getValue().asText())
+                                                        .append("</")
+                                                        .append(field.getKey())
+                                                        .append('>'));
+                        xml.append(
+                                "</row></rows><next_page/><complete>true</complete></GetCampaignReportResponse></s:Body></s:Envelope>");
+                        response = xml.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    }
+                    exchange.sendResponseHeaders(200, response.length);
+                    try (var stream = exchange.getResponseBody()) {
+                        stream.write(response);
+                    }
+                });
+        source.start();
+        try (var polling = new AnnotationConfigApplicationContext()) {
+            Path root = Path.of("..").toAbsolutePath().normalize();
+            polling.getEnvironment().setConversionService(new ApplicationConversionService());
+            polling.getEnvironment()
+                    .getPropertySources()
+                    .addFirst(
+                            new MapPropertySource(
+                                    "local-it",
+                                    Map.of(
+                                            "ingestion.local.enabled",
+                                            "true",
+                                            "ingestion.local.root",
+                                            root.toString(),
+                                            "ingestion.local.output",
+                                            output.toString(),
+                                            "ingestion.local.python",
+                                            pythonExecutable(root),
+                                            "ingestion.local.endpoint",
+                                            "http://127.0.0.1:" + source.getAddress().getPort(),
+                                            "ingestion.local.lease-duration",
+                                            "1s",
+                                            "ingestion.local.poll-delay",
+                                            "50",
+                                            "ingestion.local.request-timeout",
+                                            "2s",
+                                            "ingestion.local.process-timeout",
+                                            "30s")));
+            polling.registerBean(FetchJobQueue.class, () -> queue);
+            polling.registerBean(JdbcTemplate.class, () -> jdbc);
+            polling.registerBean(ObjectMapper.class, () -> json);
+            polling.register(LocalWorkerConfiguration.class);
+            polling.refresh();
+            await().atMost(Duration.ofSeconds(15))
+                    .untilAsserted(
+                            () ->
+                                    assertThat(jobs.find(tenant, id).orElseThrow().stage())
+                                            .isEqualTo(IngestionStage.LOAD));
+            var job = jobs.find(tenant, id).orElseThrow();
+            assertThat(job.status()).isEqualTo(IngestionStatus.RUNNING);
+            assertThat(job.stage()).isEqualTo(IngestionStage.LOAD);
+            assertThat(job.rowsReceived()).isEqualTo(1);
+            assertThat(job.rowsLoaded()).isZero();
+            assertThat(job.finishedAt()).isNull();
+            assertThat(Files.readString(Path.of(job.rawManifestUri())))
+                    .contains("\"complete\": true");
+            assertThat(Files.readString(Path.of(job.normalizedManifestUri())))
+                    .contains("\"normalized_row_count\": 1");
+            assertThat(
+                            Files.size(
+                                    Path.of(job.normalizedManifestUri())
+                                            .getParent()
+                                            .resolve("campaign.parquet")))
+                    .isGreaterThan(0);
+            assertThat(queue.claimNext("no-local-work", Duration.ofSeconds(1))).isEmpty();
+            var read =
+                    authenticatedApi.exchange(
+                            "/api/v1/ingestion-jobs/" + id,
+                            HttpMethod.GET,
+                            new HttpEntity<>(headers),
+                            Map.class);
+            assertThat(read.getBody())
+                    .containsEntry("stage", "LOAD")
+                    .containsEntry("status", "RUNNING");
+            assertThat(
+                            jdbc.queryForObject(
+                                    "SELECT COUNT(*) FROM ingestion_checkpoints", Integer.class))
+                    .isZero();
+            assertThat(
+                            jdbc.queryForObject(
+                                    "SELECT COUNT(*) FROM publication_watermarks", Integer.class))
+                    .isZero();
+        } finally {
+            source.stop(0);
+        }
+    }
+
     @Test
     void concurrentDuplicateSubmissionHasOneIdentityAndSequence() throws Exception {
         try (var workers = Executors.newFixedThreadPool(6)) {
@@ -124,6 +329,212 @@ class IngestionQueueMySqlIT {
         assertThat(next.runSequence()).isEqualTo(2);
         assertThat(Duration.between(next.createdAt(), Instant.now()).abs())
                 .isLessThan(Duration.ofSeconds(5));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"partial", "timeout", "currency"})
+    void sourceFailuresRetainEvidenceWithoutLoadOrCheckpoint(String scenario, @TempDir Path output)
+            throws Exception {
+        IngestionJob submitted = jobs.submit(request("failure"));
+        var source = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        source.createContext(
+                "/",
+                exchange -> {
+                    if (scenario.equals("timeout")) {
+                        try {
+                            Thread.sleep(400);
+                        } catch (InterruptedException error) {
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                    String row =
+                            """
+                    {"tenant_id":"%s","account_id":"%s","currency":"EUR"}
+                    """
+                                    .formatted(tenant, account);
+                    byte[] payload =
+                            ("{\"rows\":"
+                                            + (scenario.equals("currency") ? "[" + row + "]" : "[]")
+                                            + ",\"next_page\":null,\"complete\":"
+                                            + !scenario.equals("partial")
+                                            + "}")
+                                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+                    try {
+                        exchange.sendResponseHeaders(200, payload.length);
+                        try (var stream = exchange.getResponseBody()) {
+                            stream.write(payload);
+                        }
+                    } catch (java.io.IOException ignored) {
+                        exchange.close();
+                    }
+                });
+        source.start();
+        try {
+            var worker =
+                    localWorker(
+                            source,
+                            output,
+                            scenario.equals("timeout")
+                                    ? Duration.ofMillis(50)
+                                    : Duration.ofSeconds(2));
+            assertThat(worker.pollOnce()).isTrue();
+            var failed = jobs.find(tenant, submitted.id()).orElseThrow();
+            assertThat(failed.rawManifestUri()).isNotNull();
+            assertThat(failed.normalizedManifestUri()).isNull();
+            assertThat(failed.rowsLoaded()).isZero();
+            String previousRaw = failed.rawManifestUri();
+            if (scenario.equals("currency")) {
+                assertThat(failed.status()).isEqualTo(IngestionStatus.FAILED);
+                assertThat(failed.errorCode()).isEqualTo("QUALITY_REJECTED");
+                assertThat(failed.rowsRejected()).isEqualTo(1);
+                assertThat(Files.readString(Path.of(failed.rejectedUri())))
+                        .contains("raw_row", "EUR");
+            } else {
+                assertThat(failed.status()).isEqualTo(IngestionStatus.RETRY_WAIT);
+                assertThat(failed.attempt()).isEqualTo(1);
+                assertThat(worker.pollOnce()).isFalse();
+                jdbc.update(
+                        "UPDATE ingestion_jobs SET next_retry_at=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?",
+                        submitted.id().toString());
+                assertThat(worker.pollOnce()).isTrue();
+                assertThat(jobs.find(tenant, submitted.id()).orElseThrow().rawManifestUri())
+                        .isNotEqualTo(previousRaw);
+                assertThat(Files.exists(Path.of(previousRaw))).isTrue();
+            }
+            assertThat(
+                            jdbc.queryForObject(
+                                    "SELECT COUNT(*) FROM ingestion_checkpoints", Integer.class))
+                    .isZero();
+            assertThat(
+                            jdbc.queryForObject(
+                                    "SELECT COUNT(*) FROM publication_watermarks", Integer.class))
+                    .isZero();
+        } finally {
+            source.stop(0);
+        }
+    }
+
+    @Test
+    void lostLeaseStopsSubprocessAndCrashReclaimStartsFresh(@TempDir Path output) throws Exception {
+        IngestionJob submitted = jobs.submit(request("crash"));
+        var arrived = new java.util.concurrent.CountDownLatch(1);
+        var release = new java.util.concurrent.CountDownLatch(1);
+        var source = HttpServer.create(new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        source.createContext(
+                "/",
+                exchange -> {
+                    arrived.countDown();
+                    try {
+                        release.await(10, java.util.concurrent.TimeUnit.SECONDS);
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                    }
+                    byte[] body = "{\"rows\":[],\"next_page\":null,\"complete\":true}".getBytes();
+                    try {
+                        exchange.sendResponseHeaders(200, body.length);
+                        try (var stream = exchange.getResponseBody()) {
+                            stream.write(body);
+                        }
+                    } catch (java.io.IOException ignored) {
+                        exchange.close();
+                    }
+                });
+        source.start();
+        try (var executor = Executors.newSingleThreadExecutor()) {
+            var worker = localWorker(source, output, Duration.ofSeconds(5));
+            var running = executor.submit(worker::pollOnce);
+            assertThat(arrived.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            jdbc.update(
+                    "UPDATE ingestion_jobs SET lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?",
+                    submitted.id().toString());
+            var reclaimed = queue.claimNext("recovery", Duration.ofSeconds(10)).orElseThrow();
+            assertThatThrownBy(() -> running.get(5, java.util.concurrent.TimeUnit.SECONDS))
+                    .hasCauseInstanceOf(BusinessException.class);
+            var beforeRecovery = jobs.find(tenant, submitted.id()).orElseThrow();
+            assertThat(beforeRecovery.stage()).isEqualTo(IngestionStage.FETCH);
+            assertThat(beforeRecovery.rawManifestUri()).isNull();
+            assertThat(beforeRecovery.attempt()).isZero();
+            assertThat(reclaimed.generation()).isEqualTo(2);
+            try (var paths = Files.walk(output)) {
+                assertThat(
+                                paths.filter(
+                                                path ->
+                                                        path.getFileName()
+                                                                .toString()
+                                                                .equals("started.json"))
+                                        .count())
+                        .isEqualTo(1);
+            }
+            release.countDown();
+            // Simulate recovery process death too: the next poll owns a new generation and raw
+            // path.
+            jdbc.update(
+                    "UPDATE ingestion_jobs SET lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?",
+                    submitted.id().toString());
+            assertThat(worker.pollOnce()).isTrue();
+            assertThat(jobs.find(tenant, submitted.id()).orElseThrow().stage())
+                    .isEqualTo(IngestionStage.LOAD);
+            try (var paths = Files.walk(output)) {
+                assertThat(
+                                paths.filter(
+                                                path ->
+                                                        path.getFileName()
+                                                                .toString()
+                                                                .equals("started.json"))
+                                        .count())
+                        .isEqualTo(2);
+            }
+        } finally {
+            release.countDown();
+            source.stop(0);
+        }
+    }
+
+    private LocalIngestionWorker localWorker(HttpServer source, Path output, Duration timeout) {
+        Path root = Path.of("..").toAbsolutePath().normalize();
+        var pipeline =
+                new PythonIngestionPipeline(
+                        jdbc,
+                        new ObjectMapper(),
+                        root,
+                        output,
+                        pythonExecutable(root),
+                        "http://127.0.0.1:" + source.getAddress().getPort(),
+                        timeout,
+                        Duration.ofSeconds(30));
+        return new LocalIngestionWorker(queue, pipeline, "recovery-it", Duration.ofSeconds(1));
+    }
+
+    private static String pythonExecutable(Path root) {
+        return root.resolve(
+                        System.getProperty("os.name").startsWith("Windows")
+                                ? ".venv/Scripts/python.exe"
+                                : ".venv/bin/python")
+                .toString();
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"RAW_COMPLETE", "NORMALIZE"})
+    void crashBeforeLoadRestartsFetchAndRejectsEveryStaleWrite(String stage) {
+        var submitted = jobs.submit(request("local-stage-crash"));
+        var original = queue.claimNext("original", Duration.ofSeconds(10)).orElseThrow();
+        var evidence = new PipelineResult("raw-manifest", null, null, 7, 0, null, false, 1);
+        queue.recordArtifacts(original, evidence);
+        queue.beginNormalization(original);
+        jdbc.update(
+                "UPDATE ingestion_jobs SET stage=?, lease_until=TIMESTAMPADD(SECOND,-1,CURRENT_TIMESTAMP(6)) WHERE id=?",
+                stage,
+                submitted.id().toString());
+        var recovered = queue.claimNext("recovered", Duration.ofSeconds(10)).orElseThrow();
+        assertThat(recovered.job().stage()).isEqualTo(IngestionStage.FETCH);
+        assertThat(recovered.job().attempt()).isZero();
+        assertThat(recovered.job().rawManifestUri()).isNull();
+        assertCode(
+                () -> queue.recordArtifacts(original, evidence), BusinessException.Code.LEASE_LOST);
+        assertCode(() -> queue.beginNormalization(original), BusinessException.Code.LEASE_LOST);
+        assertCode(() -> queue.awaitLoad(original), BusinessException.Code.LEASE_LOST);
+        assertThat(jobs.find(tenant, submitted.id()).orElseThrow().stage())
+                .isEqualTo(IngestionStage.FETCH);
     }
 
     @Test
