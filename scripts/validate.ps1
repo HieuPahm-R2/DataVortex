@@ -8,6 +8,8 @@ try {
     }
     & rtk proxy $pipelinePython -m unittest discover -s tests -v
     if ($LASTEXITCODE -ne 0) { throw 'Pipeline tests failed' }
+    & rtk proxy $pipelinePython -m scripts.validate_dataform
+    if ($LASTEXITCODE -ne 0) { throw 'Dataform validation failed' }
     if ($Integration) {
         & rtk proxy ./mvnw.cmd -B -ntp verify
     } else {
