@@ -1,0 +1,7 @@
+defaultProject: project-5699c496-36fd-4827-92b
+defaultLocation: asia-southeast1
+defaultDataset: adtech
+defaultAssertionDataset: adtech_assertions
+vars:
+  project_id: project-5699c496-36fd-4827-92b
+  dataset: adtech

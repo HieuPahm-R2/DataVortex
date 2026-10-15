@@ -1,0 +1,6 @@
+{
+  "name": "adinsight-warehouse",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": { "@dataform/core": "3.1.0" }
+}
