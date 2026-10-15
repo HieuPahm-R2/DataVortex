@@ -1,0 +1,6 @@
+{
+  "name": "adinsight-dataform-validation",
+  "version": "0.1.0",
+  "private": true,
+  "dependencies": { "@dataform/cli": "3.1.0" }
+}
