@@ -4,7 +4,130 @@ Date: 2026-10-14
 
 ## Status
 
-Active — initial foundation slice, followed by the MVP backlog in spec section 21.
+Active — local ingestion and warehouse execution code are validated locally;
+real cloud proof and the remaining MVP backlog in spec section 21 are pending.
+
+## Warehouse execution slice — 2026-10-15
+
+Authority: user authorized the next warehouse phase. Spec 8.2, 8.3 and 10;
+ADR 0001 require immutable GCS, explicit staging schema, durable deterministic
+remote job IDs, assertions before publication, one fenced publisher, and
+checkpoint/watermark only after confirmed successful publication.
+
+- [x] GCS snapshot verification/upload and BigQuery staging adapter.
+- [x] Persist commands before submission; reconcile unknown/running outcomes.
+- [x] Dataform-owned quality/publish SQL and bounded run/scoped execution.
+- [x] Global publisher fence retained across expiry, crash and ambiguous outcomes.
+- [x] Atomic MySQL checkpoint/watermark/success after remote publication.
+- [x] Native positive/negative/recovery proof and cloud runbook.
+- [ ] Real dev-cloud verification (project/bucket/dataset/location/ADC requested).
+
+Seams: immutable storage and remote-job APIs, durable MySQL warehouse queue,
+public worker polling, Dataform compilation, and existing API status.
+Recovery: an occupied publisher slot always resumes the same ingestion job and
+persisted command, including when jobs.get reports not found. Never release an
+ambiguous job for a newer run. Replay the same deterministic command ID; only a
+confirmed terminal failure may allocate a new stage attempt. This closes the
+race where a delayed stale worker submits after another worker's lookup.
+Cloud mode is opt-in. No cloud secrets are present; no resources are provisioned
+without concrete project/location configuration. The local-only worker stays usable.
+
+Owner setup: project `project-5699c496-36fd-4827-92b`, Singapore
+`asia-southeast1`, dataset `adtech` approved. Bucket name, ADC, Dataform repository
+and pinned revision remain unavailable. The session-only `.local/cloud-setup.sh`
+uses the wizard skill's unchanged library and approved billing → bucket → dataset
+→ ADC order. Bash syntax passed; it has not been run by the agent. It writes only
+public properties. No cloud resource, IAM change or remote job was created.
+Prepared source-only `.local/dataform-source-01.zip` and concrete reviewed DDL
+`.local/warehouse-schema-01.sql`; setup/proof details are in
+[warehouse-cloud.md](../../warehouse-cloud.md).
+
+Observed local validation:
+
+- `scripts/validate.ps1 -Integration` passed 19 Python + 25 backend unit/architecture/
+  SDK boundary tests + 21 MySQL/HTTP integration tests (65, no skips), actual
+  Dataform 3.1.0 compilation, Spotless, packaging and whitespace validation.
+- V4 pins tenant execution state with composite FKs and a singleton global
+  publisher. Unknown/running remote outcomes keep the occupied job. Every stage
+  request and compiled target binding survives ownership/configuration changes.
+- Verified immutable GCS replay/conflict, strict load schema and collision labels,
+  pinned/paginated Dataform compilation, lost submit response, occupied-slot expiry,
+  quality failure before publish, five terminal retries and MySQL completion rollback.
+- Added a final FK guard/proof that deleting an occupied ingestion job cannot
+  silently release the publisher. Final `scripts/validate.ps1 -Integration`
+  passed 19 Python + 25 backend + 22 MySQL/HTTP = 66 tests, zero failures/errors/
+  skips, plus Dataform compilation, Spotless, JAR packaging and whitespace checks.
+- `WarehouseCloudProof` compiles and is explicitly opt-in; it fails on missing
+  configuration and checks real fetch/GCS/Dataform/BigQuery, load replay, correction
+  and empty publication with isolated MySQL and random cloud tenant scopes. It has
+  not run because ADC/dev resources/source revision are not configured.
+- Google libraries BOM 26.90.0 resolves Storage 2.75.0 and BigQuery 2.73.0.
+  Excluded the test-only Android JSON duplicate introduced alongside the SDK.
+  Dataform project Core 3.1.0 and external validation CLI 3.1.0 have separate lockfiles.
+- Initial red tests rejected absent queue/adapter implementations. A MySQL boolean
+  expression arrived as Number rather than Boolean; the exclusive-claim test caught
+  and corrected it. The checkpoint fault fixture now uses an isolated temporary
+  CHECK constraint rather than requiring privileged trigger creation.
+- Podman started stopped; it was started using the existing runbook and its owned
+  Testcontainers were cleaned up. Verified no running containers and restored
+  the VM to stopped after the final check.
+
+The remaining cloud proof is an external setup dependency, not a skipped test or
+a completed deployment. Keep this MVP plan active. CI and branch protection are
+unchanged/unverified.
+
+## Local ingestion worker slice — 2026-10-15
+
+Authority: user requested API → queue → REST/SOAP mocks → immutable raw →
+existing Parquet pipeline before cloud work. Spec sections 6, 8 and 10 require
+tenant/account/date/currency validation, complete pagination, fresh fetch paths,
+five bounded transient retries, lease recovery and no success before publication.
+ADR 0001 requires complete verified snapshots and retained rejection evidence.
+
+Seams under test (specified by the user): HTTP submission/status, durable queue,
+HTTP source mocks, raw manifests/pages and Parquet artifacts; timeout, partial
+pagination, crash/reclaim and lost ownership must retain evidence without publish.
+
+- [x] Connect an opt-in local polling worker and bounded subprocess pipeline.
+- [x] Fetch REST/SOAP pages into fresh gzip/checksum/manifest runs.
+- [x] Normalize against MySQL metadata and retain quality failure evidence.
+- [x] Exercise complete flow and recovery through native validation.
+- [x] Update setup/architecture and record evidence and remaining cloud work.
+
+Recovery: stop the local worker; expired local-stage leases restart the entire
+fetch in a new UUID directory. Raw artifacts are never reused or overwritten.
+Validated Parquet waits at LOAD, without a success/checkpoint or watermark write.
+
+Evidence — 2026-10-15:
+
+- `rtk proxy powershell -NoProfile -File scripts/validate.ps1 -Integration`
+  passed: 17 Python, 14 backend unit/architecture and 15 MySQL/HTTP integration
+  tests (46 total; no failures, errors or skips). Spotless and whitespace checks
+  passed, and the JAR contains the local worker and V3 migration.
+- Then strengthened the two REST/SOAP API-to-Parquet tests to use the real
+  opt-in scheduling configuration instead of manually invoking pollOnce. Both
+  passed in a focused Maven verify, including 1.5s HTTP calls under a renewable
+  1s lease. Configuration, scheduling and duration-property conversion work.
+- MySQL 8.4.8 applies V1–V3. Verified timeout/partial retries retain manifests
+  and use fresh runs; malformed rows fail with raw/page/line evidence; expired
+  RAW_COMPLETE/NORMALIZE jobs restart at FETCH and reject every stale mutation.
+- Lost ownership during HTTP cancels the real subprocess; the new owner fetches
+  a fresh run. Python proof kills a real process after a page receipt and confirms
+  no complete manifest, retained evidence and a fresh successful restart. JVM
+  death is modeled by expiry/reclaim rather than killing the test JVM.
+- Successful local jobs are RUNNING/LOAD, rowsLoaded=0 and finishedAt=null;
+  checkpoints and publication watermarks remain empty. The adapter currently
+  supports CAMPAIGN and unauthenticated REST/SOAP mocks only.
+- Podman was stopped at the beginning of this slice (unlike the earlier slice).
+  Started it using the existing runbook for Testcontainers; verified no running
+  containers and restored it to stopped after validation. The first integration attempt failed because the daemon was
+  stopped; it was rerun successfully after startup, without skipping tests.
+- [Local runbook](../../local-ingestion.md) records commands, source protocol,
+  evidence paths, fail-fast rejection counters and abrupt-JVM orphan limits.
+
+No cloud adapters, remote reconciliation, publisher fence or publish/checkpoint
+completion are implemented here. No CI or branch-protection claim is made.
+The overall MVP plan remains active for those dependent slices.
 
 ## Current slice — 2026-10-15
 

@@ -4,25 +4,30 @@ Implementation of [spec-v1.md](spec-v1.md), starting with its first three-day
 foundation slice. The Java 21 application lives in `backend/`, organized by DDD
 context and inward dependencies: domain, application, infrastructure and HTTP
 adapters. Tenant-scoped account reads, ingestion job submission/status, durable
-fetch leases, MySQL migrations, raw fixtures and Parquet tooling are implemented.
+fetch leases, MySQL migrations, an opt-in local REST/SOAP ingestion worker,
+immutable raw artifacts and Parquet normalization are implemented.
 See [architecture](docs/architecture.md) for ownership and enforced rules.
 
-GCS/BigQuery execution, Dataform orchestration, warehouse publisher fencing/reconciliation,
+Opt-in GCS/BigQuery adapters, Dataform operations and a durable publisher/reconciliation
+worker are implemented and tested locally. Live cloud verification awaits dev
+resources and ADC; see the [cloud runbook](docs/warehouse-cloud.md).
 Elasticsearch, UI, reports, forecast and bidding remain in the
 [active plan](docs/plans/active/adinsight-v1.md). This is not a completed MVP.
 
 ## Local validation (Windows PowerShell)
 
-Prerequisites: JDK 21, Python 3.14 and RTK (`rtk`). Maven Wrapper downloads
-Maven 3.9.12; Python dependencies are pinned in `requirements.txt`.
+Prerequisites: JDK 21, Python 3.14, Node.js and RTK (`rtk`). Maven Wrapper downloads
+Maven 3.9.12; Python dependencies and Dataform npm dependencies are pinned.
 
 ```powershell
 rtk proxy python -m venv .venv
 rtk proxy .venv/Scripts/python.exe -m pip install -r requirements.txt
+rtk proxy npm --prefix tools/dataform ci --ignore-scripts
+rtk proxy npm --prefix warehouse/dataform ci --ignore-scripts
 rtk proxy powershell -NoProfile -File scripts/validate.ps1
 ```
 
-This runs pipeline tests and backend tests, then builds
+This runs pipeline tests, actual local Dataform compilation and backend tests, then builds
 `backend/target/adinsight-0.1.0-SNAPSHOT.jar`. It includes ArchUnit dependency
 rules and does not run MySQL integration.
 Java formatting is checked during validation. Apply it after editing with
@@ -39,7 +44,9 @@ integration command and stop it afterward if it was originally stopped.
 
 MySQL integration uses Testcontainers with `mysql:8.4.8`, runs Flyway and
 Hibernate validation, and checks tenant constraints, HTTP/CSRF, idempotency,
-concurrent queue claims and expired-lease fencing.
+concurrent claims, lease fencing, API-to-Parquet ingestion, warehouse coordination
+and checkpoint recovery. Cloud SDK boundary tests use controlled responses;
+native validation submits no Google Cloud jobs.
 `mvnw verify` fails when a container daemon is unavailable; it does not silently skip proof.
 On Linux/macOS, use `rtk proxy sh mvnw -B -ntp package` or `verify`, and
 `rtk proxy .venv/bin/python -m unittest discover -s tests -v`.
@@ -127,29 +134,40 @@ Invalid input is 400, and out-of-tenant account/job IDs are 404. Tenant values
 in the body never select authorization scope. The full contract is in
 [OpenAPI](docs/openapi.yaml).
 
-Jobs remain PENDING until a source worker is connected. `FetchJobQueue`
-supports transactional claim, renewal, crash reclaim and bounded retry; it has
-no scheduler or cloud handler installed. It cannot publish a mart, advance a
-checkpoint or mark jobs SUCCEEDED. Publisher leases and remote reconciliation
-must be implemented before extending it beyond FETCH.
+Jobs remain PENDING until the local worker is enabled. Follow the
+[local ingestion runbook](docs/local-ingestion.md) to run REST/SOAP mocks and a
+separate worker process. The worker polls MySQL, renews its lease during source
+calls and normalization, writes fresh raw runs and invokes the existing Parquet
+pipeline against MySQL-owned account/campaign metadata. Successful local runs
+wait at RUNNING/LOAD, with `rowsLoaded=0`. The worker cannot publish a mart,
+advance a checkpoint or mark jobs SUCCEEDED. Enable the separate
+[warehouse worker](docs/warehouse-cloud.md) after configuring dev cloud resources
+to continue through LOAD/TRANSFORM/PUBLISH/CHECKPOINT.
 
 `rtk proxy docker compose stop mysql` stops this Compose service and preserves
 the local volume. Integration tests create and clean up their own containers.
 
 ## Warehouse and evidence limits
 
-`warehouse/bigquery/schema.sql` and `publish_campaign.sql` implement the campaign
-grain and transactional replace approach. Replace `YOUR_PROJECT`, provision a
-dataset in the GCS bucket's location, and use named query parameters. The future
-worker must verify account mapping, load the complete manifest/Parquet, hold a
-publisher lease and reconcile the remote job before updating MySQL checkpoints.
-These prerequisites are documented design boundaries, not implemented cloud work.
+`warehouse/bigquery/schema.sql` and `publish_campaign.sql` own the explicit schema
+and transactional replacement. `warehouse/dataform/` packages quality and publish
+operations. The cloud adapter verifies/upload snapshots, persists deterministic
+requests before submission and reconciles existing jobs. A global MySQL publisher
+slot retains its job across owner expiry and ambiguous outcomes. Only confirmed
+publication followed by an atomic checkpoint/watermark transaction yields SUCCEEDED.
+Resources, permissions, Dataform revision and query byte cap are explicit; cloud
+polling is disabled by default. Follow the cloud runbook for setup and live proof.
 
-Observed on 2026-10-15: 34 tests pass (13 pipeline, 14 backend unit/architecture,
-7 MySQL/HTTP integration), formatting passes and the backend JAR builds.
+Observed on 2026-10-15: 66 tests pass (19 Python, 25 backend unit/architecture/SDK,
+22 MySQL/HTTP integration), Dataform 3.1.0 compiles, formatting passes and the JAR builds.
+REST/SOAP end-to-end cases use the opt-in scheduler. Warehouse proof includes
+lost submission responses, stale ownership, terminal retries, quality failure,
+and atomic completion rollback/recovery; it does not substitute for live cloud proof.
 Integration used the existing Podman VM and MySQL 8.4.8.
 Detailed evidence is recorded in the active plan.
-Cloud SQL execution is unverified. No benchmark, cloud deployment, CI run or
+GCS/BigQuery/Dataform service execution is unverified. `WarehouseCloudProof` is an
+explicit opt-in command that fails on missing configuration; it is not silently skipped.
+No benchmark, cloud deployment, CI run or
 merge protection is claimed.
 
 Harness core 0.1.10 was installed after SHA-256/version verification;
