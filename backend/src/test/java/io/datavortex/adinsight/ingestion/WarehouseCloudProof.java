@@ -30,6 +30,7 @@ import org.testcontainers.junit.jupiter.*;
 /** Explicit opt-in: -Dit.test=WarehouseCloudProof. Never included or silently skipped locally. */
 @SpringBootTest
 @Testcontainers
+@ActiveProfiles("local")
 class WarehouseCloudProof {
     @Container static final MySQLContainer<?> MYSQL = new MySQLContainer<>("mysql:8.4.8");
 

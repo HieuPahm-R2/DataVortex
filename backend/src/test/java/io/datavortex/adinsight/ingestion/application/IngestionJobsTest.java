@@ -3,7 +3,7 @@ package io.datavortex.adinsight.ingestion.application;
 import static org.assertj.core.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
-import io.datavortex.adinsight.advertising.application.port.AccountCatalog;
+import io.datavortex.adinsight.advertising.application.port.IAccountCatalog;
 import io.datavortex.adinsight.identityaccess.domain.model.TenantRole;
 import io.datavortex.adinsight.identityaccess.domain.model.TenantScope;
 import io.datavortex.adinsight.ingestion.application.port.IngestionJobRepository;
@@ -17,7 +17,7 @@ import java.util.UUID;
 import org.junit.jupiter.api.Test;
 
 class IngestionJobsTest {
-    private final AccountCatalog accounts = mock(AccountCatalog.class);
+    private final IAccountCatalog accounts = mock(IAccountCatalog.class);
     private final IngestionJobRepository repository = mock(IngestionJobRepository.class);
     private final IngestionJobService jobs = new IngestionJobService(accounts, repository);
     private final UUID tenant = UUID.randomUUID();
@@ -80,8 +80,17 @@ class IngestionJobsTest {
     @Test
     void reversedDateRangeIsInvalid() {
         assertThatThrownBy(() -> new DateRange(dates.to(), dates.from()))
-                .isInstanceOf(IllegalArgumentException.class)
+                .isInstanceOf(io.datavortex.adinsight.shared.domain.InvalidInputException.class)
                 .hasMessageContaining("dateFrom");
+    }
+
+    @Test
+    void dateRangeAllows366InclusiveDaysAndRejects367() {
+        var start = LocalDate.of(2025, 10, 1);
+        assertThat(new DateRange(start, start.plusDays(365)).to()).isEqualTo(start.plusDays(365));
+        assertThatThrownBy(() -> new DateRange(start, start.plusDays(366)))
+                .isInstanceOf(io.datavortex.adinsight.shared.domain.InvalidInputException.class)
+                .hasMessageContaining("366 inclusive days");
     }
 
     private TenantScope scope(TenantRole role) {

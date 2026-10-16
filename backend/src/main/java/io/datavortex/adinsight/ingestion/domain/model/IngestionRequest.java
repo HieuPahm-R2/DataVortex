@@ -1,5 +1,6 @@
 package io.datavortex.adinsight.ingestion.domain.model;
 
+import io.datavortex.adinsight.shared.domain.InvalidInputException;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -19,7 +20,7 @@ public record IngestionRequest(
         Objects.requireNonNull(reportKind, "reportKind");
         Objects.requireNonNull(dates, "dates");
         if (idempotencyKey == null || idempotencyKey.isBlank() || idempotencyKey.length() > 100) {
-            throw new IllegalArgumentException("Idempotency-Key must contain 1 to 100 characters");
+            throw new InvalidInputException("Idempotency-Key must contain 1 to 100 characters");
         }
     }
 
