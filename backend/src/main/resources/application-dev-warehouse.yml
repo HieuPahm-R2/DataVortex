@@ -1,0 +1,7 @@
+analytics:
+  mode: ${ANALYTICS_MODE:local}
+  local:
+    root: ${LOCAL_WAREHOUSE_ROOT}
+    database: ${LOCAL_WAREHOUSE_DATABASE}
+    python: ${LOCAL_WAREHOUSE_PYTHON}
+    timeout: ${LOCAL_WAREHOUSE_TIMEOUT:30s}
