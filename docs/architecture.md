@@ -1,11 +1,5 @@
 # AdInsight backend architecture
 
-Product authority: [spec-v1.md](../spec-v1.md). The user requested DDD, SOLID and
-clean code on 2026-10-15; this document records the concrete dependency rules.
-
-The root Maven POM aggregates `backend/`. Each context lives under
-`backend/src/main/java/io/datavortex/adinsight/` and groups its own layers:
-
 ```text
 backend/
   pom.xml
@@ -30,13 +24,13 @@ advertising/
     SourcePlatform.java
   application/
     service/AccountQueryService.java  # Coordinates the account query
-    port/AccountCatalog.java          # Required persistence capability
+    port/IAccountCatalog.java         # Required persistence capability
   infrastructure/
     config/AdvertisingConfiguration.java  # Spring bean composition
     persistence/
       AdAccountEntity.java            # JPA representation of the database row
       SpringDataAccountRepository.java
-      JpaAccountCatalog.java          # Implements AccountCatalog
+      JpaAccountCatalog.java          # Implements IAccountCatalog
   interfaces/http/
     controller/AccountController.java
     dto/AccountResponse.java
@@ -45,7 +39,7 @@ advertising/
 ```
 
 The request flows through `AccountController` → `AccountQueryService` →
-`AccountCatalog`. Spring injects `JpaAccountCatalog` as the implementation.
+`IAccountCatalog`. Spring injects `JpaAccountCatalog` as the implementation.
 The persistence adapter converts `AdAccountEntity` into `AdAccount`; the HTTP
 mapper converts that domain model into `AccountResponse` for serialization.
 The controller handles HTTP input/output, while the service coordinates the use
@@ -68,7 +62,7 @@ added unless behavior requires it. Pure HTTP mappers have no servlet dependency.
 - `identityaccess`: user authentication, active tenant membership and role
   capabilities. Spring Security/HTTP/JDBC are adapters; `TenantScope` and
   `TenantRole` remain plain Java.
-- `advertising`: canonical ad-account metadata. `AccountCatalog` is a read
+- `advertising`: canonical ad-account metadata. `IAccountCatalog` is a read
   port consumed by account queries and ingestion; its JPA adapter maps a
   persistence entity to a framework-free `AdAccount`. Credentials stay outside
   this interface and HTTP DTOs.
@@ -137,7 +131,16 @@ defers a new attempt (up to five retries). Caller-supplied delay can honor a
 source's Retry-After. Permanent failure is explicit; dependency messages are
 not persisted as error codes.
 
-HTTP Basic credentials are revalidated per request; authentication is stored
+Default authentication is a Keycloak/OIDC resource server. Exact `(issuer, sub)`
+identity links resolve ACTIVE local users; current MySQL membership supplies
+tenant scope and roles. Signature, issuer, audience and token time claims are
+validated before metadata access. JWT roles/tenant/email cannot grant access.
+Bearer mode is stateless. Required configuration, provisioning, local Keycloak,
+revocation limits and proof are in [backend-foundation.md](backend-foundation.md)
+and [ADR 0002](decisions/0002-oidc-and-backend-foundation.md).
+
+The explicit `local` profile retains HTTP Basic/BCrypt compatibility.
+Basic credentials are revalidated per request; authentication is stored
 only in request attributes, not reused from an HTTP session. A separate session
 cookie stores CSRF state for browser mutations. Explicit authentication-strategy
 configuration avoids treating each Basic request as a new session login and
@@ -182,6 +185,65 @@ stage rather than loading/publishing blindly. The cloud composition is opt-in an
 its real service execution remains unverified until the explicit cloud proof passes.
 See [local ingestion](local-ingestion.md) and [warehouse cloud](warehouse-cloud.md).
 
-`pipeline/` owns raw/Parquet encoding; its SQLite warehouse remains a test oracle,
-not a backend analytics adapter. `warehouse/bigquery/` contains prepared cloud SQL assets.
+`pipeline/` owns raw/Parquet encoding and validated SQLite dev publication. The
+owner-approved `dev-warehouse` profile exposes it through the analytics port;
+BigQuery remains the cloud warehouse. See [local-backend.md](local-backend.md)
+and [ADR 0003](decisions/0003-local-warehouse-and-budget-policy.md).
+`warehouse/bigquery/` contains the cloud SQL assets.
 Search, UI, reports, forecast, bidding and cloud deployment remain pending.
+
+## Schema and behavior coverage
+
+The architecture accommodates further modules, but schema presence does not
+mean a complete domain model, use case or HTTP contract exists. Against spec
+section 7, coverage after the metadata/budget/dev analytics slice is:
+
+| Schema area | Migration | Implemented behavior and remaining gap |
+| --- | --- | --- |
+| tenants, users, memberships | V1 | Active identity/tenant/membership checks; administration APIs remain absent |
+| user_identities (owner-approved extension) | V5 | Exact Keycloak identity links and active local user lookup; privileged manual provisioning |
+| ad_accounts | V1 | Credential-free bounded reads and audited admin creation; connection-test remains absent |
+| campaigns | V1 | Member detail and versioned admin local-settings with atomic full projection/audit; source metadata import remains incomplete |
+| ad_groups, keywords | V1 | Tenant-parent constraints and member keyword detail hiding deleted parents; metadata import/search remain absent |
+| ingestion_jobs, ingestion_checkpoints, publication_watermarks | V1–V4 | Durable queue, local campaign ingestion, cloud reconciliation/publication code; live cloud proof and keyword ingestion remain pending |
+| outbox_events | V1 | Immutable full campaign projection written atomically with local settings/version; Elasticsearch consumer pending |
+| audit_logs | V1 | Atomic account/local-settings/budget audits; platform administration/bidding audit behavior pending |
+| budget_plans, kpi_targets | V6 | Admin save/member read, revision CAS, serialized nonoverlapping active periods, exact account currency/DECIMAL policy and atomic KPI replacement |
+| report_jobs | Absent | Snapshot/export/download authorization and retention pending |
+| forecast_runs, alerts | Absent | Forecast orchestration/results, dedupe and acknowledgement pending |
+| bid_proposals | Absent | Approval, stale-version checks, simulator execution and audit pending |
+
+Account create/list, campaign/keyword detail, local settings, budgets/KPI,
+local analytics summary/daily, ingestion submit/status and local-profile CSRF are
+HTTP use cases today. Platform-admin operations are not implemented. The four
+missing business tables must be introduced with their owning behavior and proof,
+rather than empty entity/repository classes that suggest functionality exists.
+
+The budgeting context owns the accepted KPI whitelist, positive DECIMAL(20,6)
+targets and revision semantics. Its JDBC adapter locks the owning campaign before
+checking active overlap, including first-plan creation; simultaneous inserts
+therefore cannot both pass an empty overlap query. KPI rows and audit share the
+same transaction. Metadata patches distinguish omission from explicit clearing,
+check version before no-op detection, and retain immutable versioned outbox payloads.
+
+Analytics application/domain remain plain Java. Its MySQL scope adapter resolves
+active campaigns within verified tenant/account/currency scope; the outbound
+Python adapter reads one SQLite facts/watermark transaction using exact Decimal
+sums and ratios, then maps decimal strings to the HTTP contract. An unavailable
+warehouse returns 503; it cannot create a database or silently return empty data.
+The explicit development profile does not select Basic authentication. Local
+publication is currently a CLI step; it does not complete cloud ingestion jobs
+or write MySQL cloud checkpoints. Cloud analytics reads, automatic local completion,
+reporting and forecasts remain pending; BigQuery publication code is preserved.
+
+Account pagination is a framework-free `PageQuery`/`AccountPage` interface. Its
+JPA adapter uses an ID-sorted, tenant-filtered `Slice` (size+1); HTTP returns page,
+size and hasMore without an unbounded query or COUNT. Offset pages are live
+reads. Search retains the separate PIT/cursor contract in spec section 9.4.
+
+Shared HTTP adapters return safe, correlated JSON for domain, validation,
+framework and unexpected errors, preserving status/protocol headers. Authentication
+and membership dependency failures fail closed with 503. JSON request logs carry
+verified tenant/user context; full worker metrics and production deployment
+observability remain pending. Existing ArchUnit rules continue to enforce the
+inward dependency direction through the normal Maven command.

@@ -1,17 +1,25 @@
 openapi: 3.1.0
 info:
   title: AdInsight API
-  version: 0.1.0
-  description: Account metadata and durable ingestion queue. Cloud execution is not wired yet.
+  version: 0.3.0
+  description: >-
+    Tenant-scoped metadata, budgets/KPI, development analytics and durable ingestion queue. Default authentication
+    uses Keycloak/OIDC JWT access tokens. Basic authentication and session CSRF are
+    available only with the explicit local profile. Responses carry X-Request-Id;
+    JSON errors include the same requestId and safe details.
 servers:
   - url: /api/v1
 security:
-  - basicAuth: []
+  - bearerAuth: []
+  - basicAuth: [] # Explicit local development profile only
 paths:
   /csrf:
     get:
       operationId: getCsrfToken
-      summary: Obtain a CSRF token and retain its session cookie for POST requests
+      summary: Local profile only — obtain session CSRF proof for Basic-authenticated mutations
+      description: This endpoint is absent in default OIDC mode; Bearer requests do not use CSRF sessions.
+      security:
+        - basicAuth: []
       parameters:
         - {$ref: '#/components/parameters/Tenant'}
       responses:
@@ -29,11 +37,17 @@ paths:
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '503': {$ref: '#/components/responses/Unavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
   /ingestion-jobs:
     post:
       operationId: submitIngestionJob
       summary: Tenant admin submits an account/report/date snapshot request
-      description: Same tenant/key/scope returns the same job; changed scope returns 409. CSRF token and session cookie are required.
+      description: >-
+        Same tenant/key/scope returns the same job; changed scope returns 409.
+        OIDC uses an Authorization Bearer token without a session. In the local
+        Basic profile, a CSRF token and its session cookie are also required.
+        Date ranges contain at most 366 inclusive days.
       parameters:
         - {$ref: '#/components/parameters/Tenant'}
         - in: header
@@ -42,7 +56,8 @@ paths:
           schema: {type: string, minLength: 1, maxLength: 100}
         - in: header
           name: X-CSRF-TOKEN
-          required: true
+          required: false
+          description: Required only in local Basic mode, together with its CSRF session cookie
           schema: {type: string}
       requestBody:
         required: true
@@ -71,6 +86,9 @@ paths:
         '404': {$ref: '#/components/responses/NotFound'}
         '409': {$ref: '#/components/responses/Conflict'}
         '503': {$ref: '#/components/responses/Unavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
   /ingestion-jobs/{id}:
     get:
       operationId: getIngestionJob
@@ -92,15 +110,54 @@ paths:
         '403': {$ref: '#/components/responses/Forbidden'}
         '404': {$ref: '#/components/responses/NotFound'}
         '503': {$ref: '#/components/responses/Unavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
   /accounts:
+    post:
+      operationId: createAccount
+      summary: Tenant admin creates account metadata
+      description: >-
+        Credential reference is stored without dereferencing or testing provider connectivity; response and audit omit it.
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CreateAccount'}
+      responses:
+        '201':
+          description: Created metadata
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/AccountCreated'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
     get:
       operationId: listAccounts
       summary: List accounts in the authenticated tenant
+      description: >-
+        Zero-based offset pagination ordered by account ID ascending. The database
+        fetches size+1 internally to determine hasMore, without a total count.
+        page*size must not exceed 2147483647. Pages are live reads, not a snapshot.
       parameters:
         - in: header
           name: X-Tenant-Id
           required: true
           schema: {type: string, format: uuid}
+        - in: query
+          name: page
+          schema: {type: integer, minimum: 0, default: 0}
+        - in: query
+          name: size
+          schema: {type: integer, minimum: 1, maximum: 100, default: 20}
       responses:
         '200':
           description: Credential-free metadata scoped by verified active membership
@@ -111,8 +168,11 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [items, requestId]
+                required: [items, page, size, hasMore, requestId]
                 properties:
+                  page: {type: integer, minimum: 0}
+                  size: {type: integer, minimum: 1, maximum: 100}
+                  hasMore: {type: boolean}
                   requestId: {type: string, format: uuid}
                   items:
                     type: array
@@ -126,20 +186,394 @@ paths:
                         currency: {type: string, pattern: '^[A-Z]{3}$'}
                         timezone: {type: string}
                         status: {type: string}
-        '400': {$ref: '#/components/responses/InvalidTenant'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
         '401': {$ref: '#/components/responses/Unauthorized'}
         '403': {$ref: '#/components/responses/Forbidden'}
         '503': {$ref: '#/components/responses/Unavailable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+  /campaigns/{id}:
+    get:
+      operationId: getCampaign
+      summary: Member reads a campaign detail
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/ResourceId'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Campaign'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /keywords/{id}:
+    get:
+      operationId: getKeyword
+      summary: Member reads a keyword with active campaign and ad-group parents
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/ResourceId'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Keyword'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /campaigns/{id}/local-settings:
+    patch:
+      operationId: patchCampaignLocalSettings
+      summary: Tenant admin patches versioned local note and tags
+      description: >-
+        Omitted fields are preserved; null clears a field. At least one setting is required. A stale expectedVersion returns 409. A changed patch atomically increments searchVersion and writes immutable full projection outbox plus audit; unchanged values create no event. Source fields are not editable.
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/ResourceId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/LocalSettingsPatch'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Campaign'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /campaigns/{id}/budget-plan:
+    put:
+      operationId: saveBudgetPlan
+      summary: Tenant admin saves a budget and KPI targets by exact period
+      description: >-
+        The period pair identifies the plan. expectedRevision 0 creates; an existing plan requires its current positive revision. Active inclusive periods cannot overlap; currency must match the account. Budget, KPI replacement and audit are atomic.
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/ResourceId'}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/SaveBudget'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BudgetPlan'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '409': {$ref: '#/components/responses/Conflict'}
+        '415': {$ref: '#/components/responses/UnsupportedMediaType'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+    get:
+      operationId: getBudgetPlan
+      summary: Member refreshes a budget by exact period
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/ResourceId'}
+        - {$ref: '#/components/parameters/PeriodStart'}
+        - {$ref: '#/components/parameters/PeriodEnd'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/BudgetPlan'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /analytics/summary:
+    get:
+      operationId: getAnalyticsSummary
+      summary: Member reads date-filtered totals in separate currency groups
+      description: >-
+        Inclusive date range at most 366 days. No currency conversion. Dev warehouse requires the explicit dev-warehouse profile and returns source LOCAL. Cloud analytics is not yet configured and returns WAREHOUSE_UNAVAILABLE 503.
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/DateFrom'}
+        - {$ref: '#/components/parameters/DateTo'}
+        - {$ref: '#/components/parameters/Currency'}
+        - {$ref: '#/components/parameters/AccountFilter'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Analytics'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
+  /analytics/campaigns/{id}/daily:
+    get:
+      operationId: getCampaignDailyAnalytics
+      summary: Member reads observed campaign daily metrics and publication provenance
+      description: >-
+        Ratios use sums; decimals are strings; zero denominators are null. Missing dates are not filled with fabricated zero metrics. Deleted or foreign-tenant campaign returns 404.
+      parameters:
+        - {$ref: '#/components/parameters/Tenant'}
+        - {$ref: '#/components/parameters/ResourceId'}
+        - {$ref: '#/components/parameters/DateFrom'}
+        - {$ref: '#/components/parameters/DateTo'}
+      responses:
+        '200':
+          description: Tenant-scoped result
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/Analytics'}
+        '400': {$ref: '#/components/responses/InvalidRequest'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+        '404': {$ref: '#/components/responses/NotFound'}
+        '406': {$ref: '#/components/responses/NotAcceptable'}
+        '500': {$ref: '#/components/responses/InternalError'}
+        '503': {$ref: '#/components/responses/Unavailable'}
 components:
   parameters:
+    ResourceId:
+      in: path
+      name: id
+      required: true
+      schema: {type: string, format: uuid}
+    DateFrom:
+      in: query
+      name: dateFrom
+      required: true
+      schema: {type: string, format: date}
+    DateTo:
+      in: query
+      name: dateTo
+      required: true
+      schema: {type: string, format: date}
+    PeriodStart:
+      in: query
+      name: periodStart
+      required: true
+      schema: {type: string, format: date}
+    PeriodEnd:
+      in: query
+      name: periodEnd
+      required: true
+      schema: {type: string, format: date}
+    Currency:
+      in: query
+      name: currency
+      schema: {type: string, pattern: '^[A-Z]{3}$'}
+    AccountFilter:
+      in: query
+      name: accountId
+      schema: {type: string, format: uuid}
     Tenant:
       in: header
       name: X-Tenant-Id
       required: true
       schema: {type: string, format: uuid}
   securitySchemes:
-    basicAuth: {type: http, scheme: basic}
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: >-
+        Keycloak access token with the configured issuer and API audience. Identity
+        is an explicitly provisioned (issuer, subject) to local user link. Token
+        roles and tenant claims do not grant application permissions.
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Available only when the local development profile is explicitly active
   schemas:
+    Account:
+      type: object
+      required: [id, platform, sourceAccountId, currency, timezone, status]
+      properties:
+        id: {type: string, format: uuid}
+        platform: {type: string, enum: [MOCK_REST, MOCK_SOAP, GOOGLE_ADS]}
+        sourceAccountId: {type: string}
+        currency: {type: string}
+        timezone: {type: string}
+        status: {type: string}
+    CreateAccount:
+      type: object
+      required: [platform, sourceAccountId, currency, timezone]
+      properties:
+        platform: {type: string, enum: [MOCK_REST, MOCK_SOAP, GOOGLE_ADS]}
+        sourceAccountId: {type: string, minLength: 1, maxLength: 255}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+        timezone: {type: string, maxLength: 64}
+        credentialRef:
+          type: [string, 'null']
+          maxLength: 512
+          description: Secret Manager resource name; literal tokens are rejected
+    AccountCreated:
+      type: object
+      required: [account, requestId]
+      properties:
+        account: {$ref: '#/components/schemas/Account'}
+        requestId: {type: string, format: uuid}
+    Campaign:
+      type: object
+      required: [id, accountId, platform, sourceCampaignId, name, sourceStatus, localTags, searchVersion, updatedAt, requestId]
+      properties:
+        id: {type: string, format: uuid}
+        accountId: {type: string, format: uuid}
+        platform: {type: string, enum: [MOCK_REST, MOCK_SOAP, GOOGLE_ADS]}
+        sourceCampaignId: {type: string}
+        name: {type: string}
+        sourceStatus: {type: string}
+        localNote: {type: [string, 'null']}
+        localTags: {type: array, items: {type: string}}
+        startDate: {type: [string, 'null'], format: date}
+        endDate: {type: [string, 'null'], format: date}
+        searchVersion: {type: integer, format: int64, minimum: 1}
+        updatedAt: {type: string, format: date-time}
+        requestId: {type: string, format: uuid}
+    Keyword:
+      type: object
+      required: [id, accountId, campaignId, adGroupId, platform, sourceKeywordId, text, matchType, status, bidMicros, currency, searchVersion, updatedAt, requestId]
+      properties:
+        id: {type: string, format: uuid}
+        accountId: {type: string, format: uuid}
+        campaignId: {type: string, format: uuid}
+        adGroupId: {type: string, format: uuid}
+        platform: {type: string, enum: [MOCK_REST, MOCK_SOAP, GOOGLE_ADS]}
+        sourceKeywordId: {type: string}
+        text: {type: string}
+        matchType: {type: string, enum: [EXACT, PHRASE, BROAD]}
+        status: {type: string}
+        bidMicros: {type: string, pattern: '^[0-9]+$'}
+        currency: {type: string}
+        searchVersion: {type: integer, format: int64, minimum: 1}
+        updatedAt: {type: string, format: date-time}
+        requestId: {type: string, format: uuid}
+    LocalSettingsPatch:
+      type: object
+      required: [expectedVersion]
+      anyOf:
+        - required: [localNote]
+        - required: [localTags]
+      properties:
+        expectedVersion: {type: integer, format: int64, minimum: 1}
+        localNote:
+          type: [string, 'null']
+          description: At most 65535 UTF-8 bytes (MySQL TEXT)
+        localTags: {type: [array, 'null'], items: {type: string}}
+    KpiTarget:
+      type: object
+      required: [metric, operator, targetValue, minSamples]
+      properties:
+        metric: {type: string, enum: [SPEND, CONVERSIONS, CPA, ROAS]}
+        operator: {type: string, enum: [LTE, GTE]}
+        targetValue:
+          type: string
+          description: Positive DECIMAL(20,6), supplied and returned as a decimal string
+        minSamples: {type: integer, format: int64, minimum: 0}
+    SaveBudget:
+      type: object
+      required: [periodStart, periodEnd, amount, currency, expectedRevision, active, kpiTargets]
+      properties:
+        periodStart: {type: string, format: date}
+        periodEnd: {type: string, format: date}
+        amount: {type: string, description: 'Positive DECIMAL(20,6) without rounding'}
+        currency: {type: string, pattern: '^[A-Z]{3}$'}
+        expectedRevision: {type: integer, format: int64, minimum: 0}
+        active: {type: boolean}
+        kpiTargets: {type: array, items: {$ref: '#/components/schemas/KpiTarget'}}
+    BudgetPlan:
+      type: object
+      required: [id, campaignId, periodStart, periodEnd, amount, currency, revision, active, kpiTargets, updatedAt, requestId]
+      properties:
+        id: {type: string, format: uuid}
+        campaignId: {type: string, format: uuid}
+        periodStart: {type: string, format: date}
+        periodEnd: {type: string, format: date}
+        amount: {type: string}
+        currency: {type: string}
+        revision: {type: integer, format: int64, minimum: 1}
+        active: {type: boolean}
+        kpiTargets: {type: array, items: {$ref: '#/components/schemas/KpiTarget'}}
+        updatedAt: {type: string, format: date-time}
+        requestId: {type: string, format: uuid}
+    MetricValues:
+      type: object
+      required: [impressions, clicks, conversions, cost, conversionValue, ctr, cpc, cpa, roas, cvr]
+      properties:
+        impressions: {type: string}
+        clicks: {type: string}
+        conversions: {type: string}
+        cost: {type: string}
+        conversionValue: {type: string}
+        ctr: {type: [string, 'null']}
+        cpc: {type: [string, 'null']}
+        cpa: {type: [string, 'null']}
+        roas: {type: [string, 'null']}
+        cvr: {type: [string, 'null']}
+    Analytics:
+      type: object
+      required: [source, dateFrom, dateTo, dataAsOf, inputWatermark, groups, requestId]
+      properties:
+        source: {type: string, enum: [LOCAL]}
+        dateFrom: {type: string, format: date}
+        dateTo: {type: string, format: date}
+        dataAsOf: {type: [string, 'null'], format: date-time}
+        requestId: {type: string, format: uuid}
+        inputWatermark:
+          type: array
+          items:
+            type: object
+            required: [accountId, runSequence, publishedRunId, dataAsOf]
+            properties:
+              accountId: {type: string, format: uuid}
+              runSequence: {type: integer, format: int64, minimum: 1}
+              publishedRunId: {type: string, format: uuid}
+              dataAsOf: {type: string, format: date-time}
+        groups:
+          type: array
+          items:
+            type: object
+            required: [currency, totals, days]
+            properties:
+              currency: {type: string}
+              totals: {$ref: '#/components/schemas/MetricValues'}
+              days:
+                type: array
+                items:
+                  type: object
+                  required: [date, metrics]
+                  properties:
+                    date: {type: string, format: date}
+                    metrics: {$ref: '#/components/schemas/MetricValues'}
     IngestionJob:
       type: object
       required: [id, accountId, reportKind, dateFrom, dateTo, status, stage, attempt, runSequence, rowsReceived, rowsLoaded, rowsRejected, createdAt, requestId]
@@ -164,14 +598,37 @@ components:
         requestId: {type: string, format: uuid}
     ApiError:
       type: object
-      required: [code, message, requestId]
+      required: [code, message, requestId, details]
       properties:
         code: {type: string}
         message: {type: string}
         requestId: {type: string, format: uuid}
+        details:
+          type: array
+          items:
+            type: object
+            required: [field, message]
+            properties:
+              field: {type: string}
+              message: {type: string}
   responses:
+    InternalError:
+      description: INTERNAL_ERROR — unexpected server failure with a safe correlated response
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    NotAcceptable:
+      description: NOT_ACCEPTABLE — the endpoint produces JSON; errors still use the JSON error schema
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
+    UnsupportedMediaType:
+      description: UNSUPPORTED_MEDIA_TYPE — request content type is unsupported
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/ApiError'}
     InvalidRequest:
-      description: INVALID_REQUEST or INVALID_TENANT — invalid body, dates or headers
+      description: INVALID_REQUEST or INVALID_TENANT — invalid body, dates, headers or pagination
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ApiError'}
@@ -181,7 +638,7 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/ApiError'}
     Conflict:
-      description: IDEMPOTENCY_CONFLICT — key was already used for another scope
+      description: IDEMPOTENCY_CONFLICT, OPTIMISTIC_CONFLICT, RESOURCE_CONFLICT or BUDGET_PERIOD_CONFLICT — reload current state before retrying
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ApiError'}
@@ -196,12 +653,12 @@ components:
         application/json:
           schema: {$ref: '#/components/schemas/ApiError'}
     Forbidden:
-      description: TENANT_FORBIDDEN or FORBIDDEN — active membership, permitted role and valid CSRF are required
+      description: TENANT_FORBIDDEN or FORBIDDEN — active membership and permitted role required; local Basic mutations also require CSRF
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ApiError'}
     Unavailable:
-      description: DATABASE_UNAVAILABLE — data or authorization dependency failed
+      description: DATABASE_UNAVAILABLE, AUTHENTICATION_UNAVAILABLE or WAREHOUSE_UNAVAILABLE — data, authorization, identity or warehouse dependency failed
       content:
         application/json:
           schema: {$ref: '#/components/schemas/ApiError'}
