@@ -5,6 +5,10 @@ public final class BusinessException extends RuntimeException {
         FORBIDDEN,
         NOT_FOUND,
         IDEMPOTENCY_CONFLICT,
+        OPTIMISTIC_CONFLICT,
+        RESOURCE_CONFLICT,
+        BUDGET_PERIOD_CONFLICT,
+        WAREHOUSE_UNAVAILABLE,
         LEASE_LOST
     }
 
