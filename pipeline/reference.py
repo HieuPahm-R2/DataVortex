@@ -1,4 +1,4 @@
-"""SQLite correctness oracle for local tests; production analytics is BigQuery.
+"""Validated SQLite snapshot publisher for tests and opt-in development analytics.
 
 This model proves replace-scope/decimal rules, not distributed leases or cloud recovery.
 """
@@ -37,6 +37,8 @@ class ReferenceWarehouse:
         digest = hashlib.sha256(manifest_bytes).hexdigest()
         received = 0
         with self.db:
+            # Serialize independent local publishers before reading the current run sequence.
+            self.db.execute("BEGIN IMMEDIATE")
             self.db.execute("DELETE FROM stage")
             for row in normalized_rows(manifest_path, registry_path):
                 received += 1
