@@ -7,6 +7,166 @@ Date: 2026-10-14
 Active — local ingestion and warehouse execution code are validated locally;
 real cloud proof and the remaining MVP backlog in spec section 21 are pending.
 
+## Local backend completion — 2026-10-16
+
+User outcome: continue backend implementation without activating GCS billing.
+No paid service, cloud provisioning or live warehouse job is authorized/required
+for this work. Resume the existing plan rather than introducing a task database.
+
+Immediate authority: spec 5/6.3/7/9.5/11 require tenant-scoped metadata,
+TENANT_ADMIN mutations, source-owned names/status, app-owned local settings,
+optimistic conflict 409, versioned immutable full projections and atomic outbox.
+Detail must exclude deleted entities and deleted parents. MySQL remains metadata
+authority; existing cloud adapters remain opt-in.
+
+Approach: first implement real account creation and campaign/keyword detail plus
+versioned local-settings mutations. Then add budget/KPI behavior after the owner
+settles its whitelist/operators. The owner now approved a development-only local
+warehouse while retaining BigQuery for cloud, and KPI metrics SPEND, CONVERSIONS,
+CPA, ROAS with LTE/GTE, positive targets, nonnegative minimum samples, account
+currency, nonoverlapping active budgets and revision checks. Implement these
+accepted decisions with explicit storage provenance and no fake cloud success.
+
+Recovery: additive migrations only, transaction-scoped metadata/outbox/audit
+writes, isolated Testcontainers state. Preserve the existing dirty workspace,
+single Compose file/shared network and OIDC/Basic profile behavior. Leave the
+existing container daemon and unrelated processes running.
+
+- [x] Account creation with role checks, tenant ownership and credential-free responses.
+- [x] Campaign/keyword detail and parent soft-delete isolation.
+- [x] Optimistic local-settings mutation plus atomic immutable outbox/audit evidence.
+- [x] Budget/KPI policy decision, schema and transactional behavior.
+- [x] Development warehouse reader and summary/daily API, reproducible fixture/metadata SQL.
+- [x] OpenAPI/runbooks/schema coverage, native validation and exact evidence.
+
+Focused proof: 5 metadata/budget domain tests, 8 MySQL HTTP/concurrency/rollback
+tests and 5 actual MySQL/SQLite/Python/HTTP analytics cases passed. Publication
+replay/correction and independent simultaneous SQLite publishers pass Python
+proof. Full regression remains pending below; these focused counts are not the
+final suite total. Local publication remains an explicit CLI step, with no cloud
+job success/checkpoint side effect. Automatic local completion, search, report
+snapshots/exports, forecast/alerts and bid simulator remain subsequent slices.
+
+Observed repairs: explicit JSON Content-Type was needed in the new HTTP test
+client; domain input errors must extend RuntimeException directly to avoid JPA
+exception translation of IllegalArgumentException into DataAccessException/503.
+The real HTTP currency-negative test caught this and now expects 400. Temporary
+CHECK fault fixtures are tenant-specific and assert the named database constraint
+before proving rollback. A long Windows temp path prevented raw run creation;
+the integration fixture now uses a short unique owned .local path. Incremental
+Maven compilation twice lost unrelated target classes; clean recompilation
+restored them. Root cause is unverified; no harness or compiler policy changed.
+
+Final evidence — 2026-10-16:
+
+- `rtk proxy powershell -NoProfile -File scripts/validate.ps1 -Integration` passed:
+  24 Python, 46 Java unit/HTTP/architecture/SDK and 41 real MySQL/Keycloak integration
+  tests (111 total, zero failures/errors/skips). Actual Dataform 3.1.0 compilation,
+  Spotless and `git diff --check` passed; the backend JAR was rebuilt.
+- MySQL 8.4.8 applies V1–V6. Public HTTP proof covers member reads, admin mutations,
+  exact decimal strings, currency-negative 400, stale-version 409, tenant 404,
+  deleted parents, immutable full outbox events and audited credential-free account
+  creation. Simultaneous metadata/budget writers and forced named audit constraint
+  failures prove conflict/rollback behavior.
+- The local analytics integration executes `scripts.prepare_local_backend`, imports
+  its generated SQL into isolated MySQL and reads its actual SQLite file through
+  Python and real HTTP. Baseline VND cost=488225000 and conversions=1952.9; currency
+  groups and campaign daily totals agree. Deleted/foreign campaigns are excluded.
+  Missing database is 503 and is not created; empty valid dates yield zero/null.
+  The development-profile guard and cloud-mode no-fallback 503 are exercised.
+- Existing real Keycloak/S256 PKCE, identity/revocation, REST/SOAP ingestion and
+  warehouse reconciliation/checkpoint recovery regression tests pass. Local facts
+  and reads do not write MySQL cloud checkpoints or publication watermarks.
+- OpenAPI 0.3 parses: 10 paths, 12 operations and 143 resolved local references.
+  The JAR contains V6, the dev warehouse profile and analytics/budget HTTP classes.
+  The single Compose file validates with the existing Podman Compose provider.
+- `docs/local-backend.md` records setup, exact HTTP semantics, source freshness
+  limits, manual local publication and the remaining cloud read/export/forecast work.
+
+This metadata/budget/dev analytics slice is complete. The overall MVP plan stays
+active for automatic local job completion, cloud analytics reads, search, report
+snapshots/exports, forecasts/alerts, bid simulation and deployment/benchmark proof.
+No live cloud execution, paid provisioning, hook/CI or merge-protection change is
+claimed.
+
+Proof: native Java unit/architecture, real MySQL HTTP/concurrency/rollback tests,
+existing OIDC/ingestion/warehouse regression checks and Dataform/Python validation.
+No live cloud claim or changes to hooks/CI/merge protection.
+
+## Backend foundation — 2026-10-16
+
+User outcome: strengthen the Java/Spring backend foundation before implementing
+the remaining schema modules. This does not claim a completed enterprise system.
+The user selected OIDC/OAuth2 and account pagination: zero-based `page`, default
+`size=20`, maximum 100, fixed ascending account ID order.
+
+Authority: spec sections 5, 7, 11 and 18 require verified tenant membership,
+tenant-scoped queries, safe correlated errors and protected operations. The
+2026-10-16 user decision authorizes OIDC and the account pagination contract.
+The user chose Keycloak and explicitly provisioned `(issuer, subject)` links to
+existing local users. Exact runtime issuer/audience remain environment settings;
+no production provider was provisioned. Never infer a user from email or trust
+token-supplied tenant roles. ADR 0002 records the accepted extension.
+
+Approach: retain the inward module dependencies, add JWT resource-server
+validation and local identity resolution, strengthen the shared HTTP error
+adapter, and push bounded pagination into MySQL. Keep Basic available only as an
+explicit local development/test mode. Preserve existing uncommitted interface
+renames and other user work.
+
+Recovery: additive Flyway migration only; never rewrite applied migrations or
+delete metadata. Integration tests use isolated Testcontainers databases. The
+existing Podman machine is running; leave it running. Do not stop pre-existing
+Java processes or provision an external identity provider.
+
+- [x] Record the schema/behavior coverage and identity decision.
+- [x] Implement OIDC validation, local user mapping and tenant authorization proof.
+- [x] Normalize safe correlated HTTP/security errors with positive/negative proof.
+- [x] Implement bounded account pagination and verify MySQL ordering/isolation.
+- [x] Update OpenAPI/setup/architecture and run native validation.
+
+Validation owner: existing Maven unit/MockMvc/ArchUnit tests, MySQL HTTP
+integration tests and `scripts/validate.ps1 -Integration`. Check invalid JWTs,
+inactive/unmapped identities, membership denial, dependency failure, CSRF in
+local Basic mode, pagination bounds/order and sanitized errors. CI/hook/branch
+protection are not changed by this work.
+
+Focused proof passed: real Keycloak discovery/JWKS, current DB permissions and
+revocation, exact/unique identity links, bounded MySQL pages, safe authentication
+outages, invalid JWTs and framework/internal errors. The imported web client also
+completed real authorization-code/S256 PKCE through HTTP and rejected missing
+PKCE and ID tokens. The test HTTP adapter must replay the local browser's cookies
+to the same Keycloak origin; Java's cookie handler does not model the browser's
+localhost secure-cookie handling. No provider protection was disabled to pass.
+An incremental Java build transiently lost generated class files; a clean build
+recovered. No source policy or validation was weakened for either repair.
+
+Final evidence — 2026-10-16:
+
+- `rtk proxy powershell -NoProfile -File scripts/validate.ps1 -Integration`
+  passed: 19 Python + 41 backend unit/HTTP/architecture + 27 real MySQL/Keycloak
+  integration tests = 87, zero failures/errors/skips. Actual Dataform 3.1.0
+  compilation, Spotless, JAR packaging and whitespace checks passed.
+- All four real Keycloak cases passed, including S256 PKCE login, missing-PKCE
+  rejection, access-token acceptance, ID-token rejection, exact identity links,
+  role changes and tenant/user/membership denial with already issued tokens.
+- Negative JWT proof rejects wrong signature/issuer/audience, expired/future or
+  missing claims, forged token roles, unmapped users and unavailable signing
+  keys/identity DB. HTTP proof keeps 400/401/403/404/405/406/415/500/503 distinctions,
+  safe field details, request correlation and method headers.
+- V1–V5 migrate on real MySQL 8.4.8; account slices preserve ID order,
+  page boundaries, hasMore and tenant isolation. Existing Basic/CSRF,
+  idempotency, source-worker and warehouse recovery proof remains green.
+- Local validation is available and passed. Optional hooks were not installed
+  or changed. No root CI workflow was found or run; CI enforcement is not
+  claimed. Branch protection remains externally unverified.
+
+Result: the owner-selected backend foundation is complete. The overall MVP plan
+remains active: six business tables, metadata mutation/search/outbox/audit
+behavior, reports/forecast/bidding and live cloud/production deployment are still
+pending. Local Keycloak integration is proven; a production issuer/audience,
+admin provisioning and a deployed browser client remain environment work.
+
 ## Warehouse execution slice — 2026-10-15
 
 Authority: user authorized the next warehouse phase. Spec 8.2, 8.3 and 10;

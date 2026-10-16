@@ -5,8 +5,12 @@
 - [Harness workflow](WORKFLOW.md): repository authority, evidence and recovery.
 - [Architecture](architecture.md): implemented boundaries, concrete service/entity/DTO/controller layout and missing modules.
 - [OpenAPI](openapi.yaml): implemented HTTP contract.
+- [Backend foundation/Keycloak](backend-foundation.md): OIDC identity linking,
+  local Basic compatibility, bounded accounts and error contract.
 - [Local ingestion](local-ingestion.md): opt-in polling worker, REST/SOAP mocks,
   immutable raw/Parquet evidence and recovery before cloud publication.
+- [Local backend without billing](local-backend.md): metadata, budget/KPI,
+  reproducible dev warehouse, analytics and cloud/local boundaries.
 - [Warehouse cloud](warehouse-cloud.md): GCS/BigQuery adapters, Dataform source,
   durable publisher recovery, dev setup and explicit live proof.
 - [Active implementation plan](plans/active/adinsight-v1.md): progress and next dependencies.

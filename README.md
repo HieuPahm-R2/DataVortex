@@ -1,7 +1,6 @@
 # DataVortex / AdInsight
 
-Implementation of [spec-v1.md](spec-v1.md), starting with its first three-day
-foundation slice. The Java 21 application lives in `backend/`, organized by DDD
+The Java 21 application lives in `backend/`, organized by DDD
 context and inward dependencies: domain, application, infrastructure and HTTP
 adapters. Tenant-scoped account reads, ingestion job submission/status, durable
 fetch leases, MySQL migrations, an opt-in local REST/SOAP ingestion worker,
@@ -11,6 +10,8 @@ See [architecture](docs/architecture.md) for ownership and enforced rules.
 Opt-in GCS/BigQuery adapters, Dataform operations and a durable publisher/reconciliation
 worker are implemented and tested locally. Live cloud verification awaits dev
 resources and ADC; see the [cloud runbook](docs/warehouse-cloud.md).
+Metadata create/detail/local settings, budget/KPI and opt-in local analytics are
+also implemented; follow [local backend without billing](docs/local-backend.md).
 Elasticsearch, UI, reports, forecast and bidding remain in the
 [active plan](docs/plans/active/adinsight-v1.md). This is not a completed MVP.
 
@@ -42,10 +43,13 @@ On this machine, the existing Podman VM provides the compatible daemon:
 `rtk proxy podman machine start podman-machine-default`. Start it before the
 integration command and stop it afterward if it was originally stopped.
 
-MySQL integration uses Testcontainers with `mysql:8.4.8`, runs Flyway and
+Integration uses Testcontainers with `mysql:8.4.8` and
+`quay.io/keycloak/keycloak:26.8.1`, runs Flyway and
 Hibernate validation, and checks tenant constraints, HTTP/CSRF, idempotency,
 concurrent claims, lease fencing, API-to-Parquet ingestion, warehouse coordination
-and checkpoint recovery. Cloud SDK boundary tests use controlled responses;
+and checkpoint recovery. OIDC proof uses real Keycloak discovery/signatures,
+explicit identity links and live DB role/revocation checks.
+Cloud SDK boundary tests use controlled responses;
 native validation submits no Google Cloud jobs.
 `mvnw verify` fails when a container daemon is unavailable; it does not silently skip proof.
 On Linux/macOS, use `rtk proxy sh mvnw -B -ntp package` or `verify`, and
@@ -64,7 +68,8 @@ metadata records and 1,200 campaign daily rows over 60 days. It writes raw gzip
 pages with checksums, explicit `decimal128(38,9)` Parquet, then validates replay,
 late corrections, partial failure and an empty complete snapshot. Output includes
 `evidence.json` and a SQLite reference warehouse. All metrics are simulated.
-SQLite is a local test oracle; the API does not use it as an analytics backend.
+SQLite also supports the explicitly enabled dev analytics adapter. Prepare an
+API dataset and matching MySQL seed with the [local backend runbook](docs/local-backend.md).
 Output paths are immutable; reusing an existing directory fails.
 
 Individual tools:
@@ -82,10 +87,10 @@ passed validation; rejected runs retain diagnostic evidence and cannot publish.
 ## Backend setup
 
 Docker Compose is local development only. Copy `.env.example` to `.env`, choose
-local passwords, then start the owned database:
+local database and Keycloak admin passwords, then start the local stack:
 
 ```powershell
-rtk proxy docker compose up -d mysql
+rtk proxy docker compose up -d
 # Set DB_PASSWORD in this shell using your local secret mechanism.
 rtk proxy ./mvnw.cmd -pl backend spring-boot:run
 ```
@@ -94,28 +99,34 @@ rtk proxy ./mvnw.cmd -pl backend spring-boot:run
 tables; Hibernate only validates them. Override `DB_URL`/`DB_USER` as needed.
 No default credentials or tenants are installed.
 
-Provision an ACTIVE `users` row with a BCrypt password hash, an ACTIVE tenant,
-and a `memberships` row through your local database administration tool. Account
-metadata must belong to that tenant. The initial API supports:
+Default authentication uses Keycloak/OIDC. Set `OIDC_ISSUER_URI` and
+`OIDC_AUDIENCE`, then provision an explicit `(issuer, subject)` identity link to
+an ACTIVE local user and tenant membership. Follow the
+[Keycloak setup and backend foundation runbook](docs/backend-foundation.md),
+including the shared Compose network and environment setup. Account
+metadata must belong to that tenant. The account API supports:
 
 ```http
-GET /api/v1/accounts
-Authorization: Basic <base64(email:password)>
+GET /api/v1/accounts?page=0&size=20
+Authorization: Bearer <Keycloak access token>
 X-Tenant-Id: <tenant UUID>
 ```
 
-Basic authentication is the initial access mechanism in this empty repository;
-serve it over HTTPS outside loopback. Requests verify active tenant membership
+Basic/BCrypt is available only with `SPRING_PROFILES_ACTIVE=local` and a
+non-NULL local password hash. Requests verify active local identity and tenant membership
 and return credential-free account metadata. Missing/invalid tenant: 400;
 missing credentials: 401; no membership: 403; database dependency failure: 503.
-Responses include a generated `requestId` and `X-Request-Id` header. Actuator
+Accounts are paginated in MySQL (default 20, max 100, ascending ID), with page,
+size and hasMore metadata. Errors include safe field details. Responses include a generated `requestId` and `X-Request-Id` header. Actuator
 endpoints require authentication. Platform-admin operations are not implemented.
 
 ### Ingestion job API
 
-1. Authenticate and call `GET /api/v1/csrf` with `X-Tenant-Id`. Retain the
+1. Authenticate using a Keycloak access token and `X-Tenant-Id`. In the explicit
+   local Basic profile only, call `GET /api/v1/csrf` with `X-Tenant-Id`. Retain the
    returned session cookie, token and header name. Each new session needs its token.
-2. As TENANT_ADMIN, submit a request with that cookie/token and an
+2. As TENANT_ADMIN, submit a request with the Bearer token (or local Basic plus
+   CSRF cookie/token) and an
    `Idempotency-Key` header (1–100 characters):
 
 ```http
@@ -144,6 +155,11 @@ advance a checkpoint or mark jobs SUCCEEDED. Enable the separate
 [warehouse worker](docs/warehouse-cloud.md) after configuring dev cloud resources
 to continue through LOAD/TRANSFORM/PUBLISH/CHECKPOINT.
 
+Without cloud billing, use the explicit local publication command and dev
+analytics profile in [local-backend.md](docs/local-backend.md). This does not
+mark cloud jobs successful. That guide also covers metadata create/detail,
+versioned local settings and the V6 budget/KPI API.
+
 `rtk proxy docker compose stop mysql` stops this Compose service and preserves
 the local volume. Integration tests create and clean up their own containers.
 
@@ -158,7 +174,22 @@ publication followed by an atomic checkpoint/watermark transaction yields SUCCEE
 Resources, permissions, Dataform revision and query byte cap are explicit; cloud
 polling is disabled by default. Follow the cloud runbook for setup and live proof.
 
-Observed on 2026-10-15: 66 tests pass (19 Python, 25 backend unit/architecture/SDK,
+Observed on 2026-10-16 after metadata/budget/dev analytics: 111 tests pass
+(24 Python, 46 backend unit/HTTP/architecture/SDK, 41 real MySQL/Keycloak
+integration), actual Dataform compilation, Spotless and whitespace checks pass,
+and the JAR packages V6 and the dev warehouse profile. Local proof imports the
+generated fixture metadata into MySQL, calls real analytics HTTP endpoints and
+verifies Decimal totals, currency groups, tenant/deleted-parent isolation and 503
+for a missing warehouse. Concurrent metadata/budget writes and forced audit
+failures exercise optimistic conflicts and transaction rollback.
+
+Earlier on 2026-10-16 after the backend foundation changes: 87 tests pass
+(19 Python, 41 backend unit/HTTP/architecture/SDK, 27 real MySQL/Keycloak
+integration), Dataform 3.1.0 compiles, formatting and whitespace checks pass,
+and the JAR builds. Keycloak proof includes real authorization-code/S256 PKCE
+login, API audience/ID-token rejection, local identity links and live DB roles.
+
+Earlier evidence on 2026-10-15: 66 tests pass (19 Python, 25 backend unit/architecture/SDK,
 22 MySQL/HTTP integration), Dataform 3.1.0 compiles, formatting passes and the JAR builds.
 REST/SOAP end-to-end cases use the opt-in scheduler. Warehouse proof includes
 lost submission responses, stale ownership, terminal retries, quality failure,
