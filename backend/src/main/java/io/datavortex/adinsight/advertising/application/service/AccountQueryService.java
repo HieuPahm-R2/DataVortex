@@ -1,18 +1,18 @@
 package io.datavortex.adinsight.advertising.application.service;
 
-import io.datavortex.adinsight.advertising.application.port.AccountCatalog;
-import io.datavortex.adinsight.advertising.domain.model.AdAccount;
+import io.datavortex.adinsight.advertising.application.port.IAccountCatalog;
+import io.datavortex.adinsight.advertising.domain.model.AccountPage;
 import io.datavortex.adinsight.identityaccess.domain.model.TenantScope;
-import java.util.List;
+import io.datavortex.adinsight.shared.domain.PageQuery;
 
 public final class AccountQueryService {
-    private final AccountCatalog catalog;
+    private final IAccountCatalog catalog;
 
-    public AccountQueryService(AccountCatalog catalog) {
+    public AccountQueryService(IAccountCatalog catalog) {
         this.catalog = catalog;
     }
 
-    public List<AdAccount> list(TenantScope scope) {
-        return catalog.list(scope.tenantId());
+    public AccountPage list(TenantScope scope, PageQuery page) {
+        return catalog.list(scope.tenantId(), page);
     }
 }

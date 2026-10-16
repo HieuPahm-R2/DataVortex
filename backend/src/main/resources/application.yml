@@ -2,7 +2,7 @@ spring:
   application:
     name: adinsight
   datasource:
-    url: ${DB_URL:jdbc:mysql://localhost:3306/adinsight?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    url: ${DB_URL:jdbc:mysql://localhost:3308/adinsight?connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
     username: ${DB_USER:adinsight}
     password: ${DB_PASSWORD}
     hikari:
@@ -17,6 +17,12 @@ spring:
       hibernate.jdbc.time_zone: UTC
   flyway:
     enabled: true
+adinsight:
+  security:
+    oidc:
+      issuer-uri: ${OIDC_ISSUER_URI:}
+      audience: ${OIDC_AUDIENCE:}
+      jwk-set-uri: ${OIDC_JWK_SET_URI:}
 ingestion:
   cloud:
     project: ${WAREHOUSE_PROJECT:}
@@ -39,5 +45,8 @@ management:
     health:
       show-details: never
 logging:
+  structured:
+    format:
+      console: logstash
   pattern:
     correlation: "[requestId=%X{requestId:-}] "

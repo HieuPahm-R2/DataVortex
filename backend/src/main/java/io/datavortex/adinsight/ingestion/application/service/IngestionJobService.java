@@ -2,7 +2,7 @@ package io.datavortex.adinsight.ingestion.application.service;
 
 import static io.datavortex.adinsight.shared.domain.BusinessException.Code.*;
 
-import io.datavortex.adinsight.advertising.application.port.AccountCatalog;
+import io.datavortex.adinsight.advertising.application.port.IAccountCatalog;
 import io.datavortex.adinsight.identityaccess.domain.model.TenantScope;
 import io.datavortex.adinsight.ingestion.application.port.IngestionJobRepository;
 import io.datavortex.adinsight.ingestion.domain.model.DateRange;
@@ -13,10 +13,10 @@ import io.datavortex.adinsight.shared.domain.BusinessException;
 import java.util.UUID;
 
 public final class IngestionJobService {
-    private final AccountCatalog accounts;
+    private final IAccountCatalog accounts;
     private final IngestionJobRepository jobs;
 
-    public IngestionJobService(AccountCatalog accounts, IngestionJobRepository jobs) {
+    public IngestionJobService(IAccountCatalog accounts, IngestionJobRepository jobs) {
         this.accounts = accounts;
         this.jobs = jobs;
     }

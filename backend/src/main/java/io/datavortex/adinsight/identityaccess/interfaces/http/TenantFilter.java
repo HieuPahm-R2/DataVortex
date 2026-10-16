@@ -1,6 +1,6 @@
 package io.datavortex.adinsight.identityaccess.interfaces.http;
 
-import io.datavortex.adinsight.identityaccess.application.port.MembershipDirectory;
+import io.datavortex.adinsight.identityaccess.application.port.IMembershipDirectory;
 import io.datavortex.adinsight.identityaccess.domain.model.TenantScope;
 import io.datavortex.adinsight.shared.interfaces.http.ErrorWriter;
 import jakarta.servlet.FilterChain;
@@ -9,16 +9,18 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import java.io.IOException;
 import java.util.UUID;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.dao.DataAccessException;
 import org.springframework.security.authentication.AnonymousAuthenticationToken;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.web.filter.OncePerRequestFilter;
 
 public class TenantFilter extends OncePerRequestFilter {
-    private final MembershipDirectory memberships;
+    private final IMembershipDirectory memberships;
     private final ErrorWriter errors;
 
-    public TenantFilter(MembershipDirectory memberships, ErrorWriter errors) {
+    public TenantFilter(IMembershipDirectory memberships, ErrorWriter errors) {
         this.memberships = memberships;
         this.errors = errors;
     }
@@ -61,6 +63,8 @@ public class TenantFilter extends OncePerRequestFilter {
                     TenantScope.class.getName(),
                     new TenantScope(tenantId, principal.getName(), role.get()));
         } catch (DataAccessException exception) {
+            LoggerFactory.getLogger(TenantFilter.class)
+                    .error("code=DATABASE_UNAVAILABLE dependency=membership");
             errors.write(
                     request,
                     response,
@@ -69,6 +73,9 @@ public class TenantFilter extends OncePerRequestFilter {
                     "Authorization dependency unavailable");
             return;
         }
-        chain.doFilter(request, response);
+        try (var tenantContext = MDC.putCloseable("tenantId", tenantId.toString());
+                var userContext = MDC.putCloseable("userId", principal.getName())) {
+            chain.doFilter(request, response);
+        }
     }
 }
