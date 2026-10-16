@@ -2,7 +2,7 @@ services:
   mysql:
     image: mysql:8.4.8
     environment:
-      MYSQL_DATABASE: adinsight
+      MYSQL_DATABASE: datavortex
       MYSQL_USER: adinsight
       MYSQL_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in .env}
       MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:?Set MYSQL_ROOT_PASSWORD in .env}
@@ -16,5 +16,24 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+    networks:
+      - datavortex
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.8.1
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?Set KEYCLOAK_ADMIN_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:${KEYCLOAK_PORT:-8081}:8080"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
+      - ./infra/keycloak/datavortex-realm.json:/opt/keycloak/data/import/datavortex-realm.json:ro
+    networks:
+      - datavortex
 volumes:
   mysql-data:
+  keycloak-data:
+networks:
+  datavortex:
+    driver: bridge
