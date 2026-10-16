@@ -32,6 +32,7 @@ paths when cloning elsewhere):
 
 ```powershell
 rtk proxy java -jar backend/target/adinsight-0.1.0-SNAPSHOT.jar `
+  --spring.profiles.active=local `
   --server.address=127.0.0.1 --server.port=0 `
   --ingestion.local.enabled=true `
   --ingestion.local.root=D:/data-vortex `
@@ -41,7 +42,9 @@ rtk proxy java -jar backend/target/adinsight-0.1.0-SNAPSHOT.jar `
 ```
 
 Submit/read a CAMPAIGN ingestion job through the authenticated API/CSRF flow
-in README. One worker processes one job at a time. Ctrl+C stops the foreground
+in README (CSRF applies only to local Basic). The loopback development worker
+uses the explicit local profile; an OIDC deployment must use its configured
+issuer/audience instead. One worker processes one job at a time. Ctrl+C stops the foreground
 worker or mock process. Worker configuration is explicit and independent of any
 source credential references; this adapter only supports unauthenticated mocks.
 KEYWORD and GOOGLE_ADS requests fail with UNSUPPORTED_SCHEMA in this local adapter.

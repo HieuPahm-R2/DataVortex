@@ -65,9 +65,7 @@ rtk proxy python -m scripts.package_dataform --output .local/dataform-source-02.
 `.local/dataform-source-01.zip` is already prepared. Put its CONTENTS at the root
 of a dedicated Dataform repository/workspace, then commit them. Do not point a
 Dataform repository at the root of this Java monorepo: its settings and definitions
-live in the exported subtree. Follow Google's
-[repository setup](https://docs.cloud.google.com/dataform/docs/create-repository)
-and [repository management](https://docs.cloud.google.com/dataform/docs/manage-repository).
+live in the exported subtree.
 Record the full resource name (`projects/.../locations/.../repositories/...`) and
 the immutable 40-character commit SHA containing the reviewed source.
 
@@ -124,10 +122,15 @@ polling using the same DB settings:
 
 ```powershell
 rtk proxy java -jar backend/target/adinsight-0.1.0-SNAPSHOT.jar `
+  --spring.profiles.active=local `
   --server.address=127.0.0.1 --server.port=0 `
   --spring.config.additional-location=optional:file:.local/cloud.properties `
   --ingestion.cloud.enabled=true
 ```
+
+This loopback dev command explicitly uses local Basic compatibility. An OIDC
+deployment must use the default profile with its configured issuer/audience;
+see [backend foundation](backend-foundation.md).
 
 The cloud worker is disabled by default. Missing resource/revision/root settings
 fail startup when enabled. Optional settings are `ingestion.cloud.poll-delay`
@@ -197,11 +200,3 @@ BigQuery load/quality/publication and MySQL completion. It checks load replay,
 late conversion correction with unchanged cost, and an empty complete snapshot.
 It retains dev GCS/staging/manifest evidence and never deletes buckets/datasets.
 No live cloud result is claimed until that command succeeds.
-
-Client versions are selected by Google's pinned libraries BOM 26.90.0 (Storage
-2.75.0, BigQuery 2.73.0). Reference semantics:
-[BOM](https://docs.cloud.google.com/java/docs/bom),
-[create-only upload](https://docs.cloud.google.com/storage/docs/samples/storage-upload-file),
-[BigQuery jobs](https://docs.cloud.google.com/bigquery/docs/running-jobs),
-[compiled Dataform actions](https://docs.cloud.google.com/dataform/reference/rest/v1/projects.locations.repositories.compilationResults/query).
-These local checks do not establish CI execution or merge protection.
